@@ -1,0 +1,4772 @@
+/* Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 and
+ * only version 2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+ * 02110-1301, USA.
+ */
+/*
+ * This software is contributed or developed by KYOCERA Corporation.
+ * (C) 2012 KYOCERA Corporation
+ */
+
+#include "msm_sensor.h"
+#include "msm.h"
+#include "msm_ispif.h"
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/workqueue.h>
+
+#define SENSOR_NAME "s5k8aay"
+#define PLATFORM_DRIVER_NAME "msm_camera_s5k8aay"
+#define s5k8aay4_obj s5k8aay_##obj
+
+//#define S5K8AAY_EXPOSURE_TBL_SIZE 11
+#define S5K8AAY_EXPOSURE_SETTING_SIZE 4
+//#define S5K8AAY_EXPOSURE_VALUE_STEP 2
+#define S5K8AAY_EXPOSURE_VALUE_STEP 1
+//#define S5K8AAY_EXPOSURE_VALUE_MAX 5
+#define S5K8AAY_EXPOSURE_VALUE_MAX 6
+#define S5K8AAY_EXPOSURE_TBL_SIZE (((S5K8AAY_EXPOSURE_VALUE_MAX) * 2) + 1)
+
+#define S5K8AAY_WB_AUTO            0
+#define S5K8AAY_WB_DAYLIGHT        1
+#define S5K8AAY_WB_FLUORESCENT     2
+#define S5K8AAY_WB_CLOUDY_DAYLIGHT 3
+#define S5K8AAY_WB_INCANDESCENT    4
+#define S5K8AAY_WB_MAX             5
+#define S5K8AAY_WB_SETTING_SIZE 11
+
+#define S5K8AAY_REG_READ_ADDR 0x0F12
+
+#define S5K8AAY_EXP_TIME_DIVISOR 400
+
+#define S5K8AAY_ERR_CHK_TBL_SIZE 2
+#define S5K8AAY_ERR_CHK_TBL_REG_SIZE 3
+#define S5K8AAY_ERR_CHK_VAL 0x0000
+
+#define S5K8AAY_REG_BURST_ADDR 0x0F12
+
+/* add special control */
+#include <linux/regulator/gpio-regulator.h>
+#include <linux/mfd/pm8xxx/pm8921.h>
+#include <linux/i2c.h>
+#include <linux/i2c/sx150x.h>
+#include <linux/gpio.h>
+#include <linux/types.h>
+#include <mach/irqs.h>
+#include <mach/rpm-regulator.h>
+#include <mach/msm_memtypes.h>
+
+
+DEFINE_MUTEX(s5k8aay_mut);
+static struct msm_sensor_ctrl_t s5k8aay_s_ctrl;
+
+static int8_t s5k8aay_wb = CAMERA_WB_AUTO;
+
+typedef struct {
+	struct work_struct work;
+	struct msm_sensor_ctrl_t *s_ctrl;
+} s5k8aay_work_t;
+
+static struct workqueue_struct *s5k8aay_err_chk_wq;
+static s5k8aay_work_t *s5k8aay_err_chk_work;
+static volatile int s5k8aay_power_on_flg = 0;
+static volatile int s5k8aay_err_chk_work_flg = 0;
+static int effect_value = CAMERA_EFFECT_OFF;
+
+static int32_t pre_exp_setting = 0;
+
+static uint8_t s5k8aay_skip_frame_flg = 0;
+
+static int s5k8aay_effect_msm_sensor_s_ctrl_by_enum(struct msm_sensor_ctrl_t *s_ctrl,
+		struct msm_sensor_v4l2_ctrl_info_t *ctrl_info, int value);
+static void msm_sensor_s5k8aay_set_skip_frame(void);
+
+static uint32_t s5k8aay_g_exposure_time = 0;
+
+/****************** mod special data for S5K8AAY ******************/
+//static struct msm_camera_i2c_reg_conf s5k8aay_start_stream_settings1[] = {
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings1[] = {
+	{0xFCFC, 0xD000},
+	{0x0010, 0x0001},
+	{0xFCFC, 0x0000},
+	{0x0000, 0x0000},
+	{0xFCFC, 0xD000},
+	{0x1030, 0x0000},
+	{0x0014, 0x0001},
+};
+
+//static struct msm_camera_i2c_reg_conf s5k8aay_start_stream_settings2[] = {
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings2[] = {
+	{0x0028, 0x7000},
+	{0x002A, 0x2470},
+};
+
+static uint16_t s5k8aay_recommend_settings3[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0xB510,
+	0x490E,
+	0x480E,
+	0xF000,
+	0xF9ED,
+	0x490E,
+	0x480E,
+	0xF000,
+	0xF9E9,
+	0x490E,
+	0x480E,
+	0x6341,
+	0x490E,
+	0x480F,
+	0xF000,
+	0xF9E2,
+	0x490E,
+	0x480F,
+	0xF000,
+	0xF9DE,
+	0x490E,
+	0x480F,
+	0xF000,
+	0xF9DA,
+	0x480E,
+	0x490F,
+	0x6448,
+	0xBC10,
+	0xBC08,
+	0x4718,
+	0x27CC,
+	0x7000,
+	0x8EDD,
+	0x0000,
+	0x2744,
+	0x7000,
+	0x8725,
+	0x0000,
+	0x26E4,
+	0x7000,
+	0x0080,
+	0x7000,
+	0x2638,
+	0x7000,
+	0xA6EF,
+	0x0000,
+	0x2604,
+	0x7000,
+	0xA0F1,
+	0x0000,
+	0x25D0,
+	0x7000,
+	0x058F,
+	0x0000,
+	0x24E4,
+	0x7000,
+	0x0000,
+	0x7000,
+	0x403E,
+	0xE92D,
+	0x00DD,
+	0xEB00,
+	0x2000,
+	0xE3A0,
+	0x1002,
+	0xE3A0,
+	0x0F86,
+	0xE3A0,
+	0x00DC,
+	0xEB00,
+	0x200A,
+	0xE3A0,
+	0x1000,
+	0xE28D,
+	0x0E3F,
+	0xE3A0,
+	0x00DB,
+	0xEB00,
+	0x2001,
+	0xE3A0,
+	0x1002,
+	0xE3A0,
+	0x0F86,
+	0xE3A0,
+	0x00D4,
+	0xEB00,
+	0x0000,
+	0xE5DD,
+	0x00C3,
+	0xE350,
+	0x0027,
+	0x1A00,
+	0x0001,
+	0xE5DD,
+	0x003C,
+	0xE350,
+	0x0024,
+	0x1A00,
+	0x02E0,
+	0xE59F,
+	0x1000,
+	0xE5D0,
+	0x0000,
+	0xE351,
+	0x0003,
+	0x1A00,
+	0x12D4,
+	0xE59F,
+	0x10B8,
+	0xE1D1,
+	0x0000,
+	0xE351,
+	0x001C,
+	0x0A00,
+	0x1000,
+	0xE3A0,
+	0x1000,
+	0xE5C0,
+	0x0000,
+	0xE3A0,
+	0x1002,
+	0xE28D,
+	0x0015,
+	0xEA00,
+	0x2000,
+	0xE5D1,
+	0x3001,
+	0xE5D1,
+	0x3403,
+	0xE182,
+	0xC2A8,
+	0xE59F,
+	0x2080,
+	0xE08C,
+	0xE7B4,
+	0xE1D2,
+	0x039E,
+	0xE004,
+	0xE80F,
+	0xE3E0,
+	0x4624,
+	0xE00E,
+	0x47B4,
+	0xE1C2,
+	0x4004,
+	0xE280,
+	0xC084,
+	0xE08C,
+	0x47B4,
+	0xE1DC,
+	0x0493,
+	0xE004,
+	0x4624,
+	0xE00E,
+	0x47B4,
+	0xE1CC,
+	0xC8B4,
+	0xE1D2,
+	0x039C,
+	0xE003,
+	0x3623,
+	0xE00E,
+	0x38B4,
+	0xE1C2,
+	0x0001,
+	0xE280,
+	0x1002,
+	0xE281,
+	0x0004,
+	0xE350,
+	0xFFE7,
+	0xBAFF,
+	0x403E,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x4010,
+	0xE92D,
+	0x00AB,
+	0xEB00,
+	0x0248,
+	0xE59F,
+	0x00B2,
+	0xE1D0,
+	0x0000,
+	0xE350,
+	0x0004,
+	0x0A00,
+	0x0080,
+	0xE310,
+	0x0002,
+	0x1A00,
+	0x1234,
+	0xE59F,
+	0x0001,
+	0xE3A0,
+	0x0DB2,
+	0xE1C1,
+	0x4010,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x4010,
+	0xE92D,
+	0x4000,
+	0xE590,
+	0x0004,
+	0xE1A0,
+	0x009F,
+	0xEB00,
+	0x0214,
+	0xE59F,
+	0x0000,
+	0xE5D0,
+	0x0000,
+	0xE350,
+	0x0002,
+	0x0A00,
+	0x0004,
+	0xE594,
+	0x00A0,
+	0xE1A0,
+	0x0004,
+	0xE584,
+	0x4010,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x4070,
+	0xE92D,
+	0x0000,
+	0xE590,
+	0x0800,
+	0xE1A0,
+	0x0820,
+	0xE1A0,
+	0x4041,
+	0xE280,
+	0x01E0,
+	0xE59F,
+	0x11B8,
+	0xE1D0,
+	0x51B6,
+	0xE1D0,
+	0x0005,
+	0xE041,
+	0x0094,
+	0xE000,
+	0x1D11,
+	0xE3A0,
+	0x008D,
+	0xEB00,
+	0x11C0,
+	0xE59F,
+	0x1000,
+	0xE5D1,
+	0x0000,
+	0xE351,
+	0x0000,
+	0x0A00,
+	0x00A0,
+	0xE1A0,
+	0x21A8,
+	0xE59F,
+	0x3FB0,
+	0xE1D2,
+	0x0000,
+	0xE353,
+	0x0003,
+	0x0A00,
+	0x31A4,
+	0xE59F,
+	0x5BB2,
+	0xE1C3,
+	0xC000,
+	0xE085,
+	0xCBB4,
+	0xE1C3,
+	0x0000,
+	0xE351,
+	0x0000,
+	0x0A00,
+	0x0080,
+	0xE1A0,
+	0x1DBC,
+	0xE1D2,
+	0x3EB4,
+	0xE1D2,
+	0x2EB2,
+	0xE1D2,
+	0x0193,
+	0xE001,
+	0x0092,
+	0xE000,
+	0x2811,
+	0xE3A0,
+	0x0194,
+	0xE001,
+	0x0092,
+	0xE000,
+	0x11A1,
+	0xE1A0,
+	0x01A0,
+	0xE1A0,
+	0x0072,
+	0xEB00,
+	0x1160,
+	0xE59F,
+	0x02B4,
+	0xE1C1,
+	0x4070,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x4010,
+	0xE92D,
+	0x006E,
+	0xEB00,
+	0x2148,
+	0xE59F,
+	0x14B0,
+	0xE1D2,
+	0x0080,
+	0xE311,
+	0x0005,
+	0x0A00,
+	0x013C,
+	0xE59F,
+	0x00B0,
+	0xE1D0,
+	0x0001,
+	0xE350,
+	0x0001,
+	0x9A00,
+	0x0001,
+	0xE3A0,
+	0x0000,
+	0xEA00,
+	0x0000,
+	0xE3A0,
+	0x3110,
+	0xE59F,
+	0x0000,
+	0xE5C3,
+	0x0000,
+	0xE5D3,
+	0x0000,
+	0xE350,
+	0x0003,
+	0x0A00,
+	0x0080,
+	0xE3C1,
+	0x110C,
+	0xE59F,
+	0x04B0,
+	0xE1C2,
+	0x00B2,
+	0xE1C1,
+	0x4010,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x41F0,
+	0xE92D,
+	0x1000,
+	0xE590,
+	0xC801,
+	0xE1A0,
+	0xC82C,
+	0xE1A0,
+	0x1004,
+	0xE590,
+	0x1801,
+	0xE1A0,
+	0x1821,
+	0xE1A0,
+	0x4008,
+	0xE590,
+	0x500C,
+	0xE590,
+	0x2004,
+	0xE1A0,
+	0x3005,
+	0xE1A0,
+	0x000C,
+	0xE1A0,
+	0x004E,
+	0xEB00,
+	0x60A0,
+	0xE59F,
+	0x00B2,
+	0xE1D6,
+	0x0000,
+	0xE350,
+	0x000E,
+	0x0A00,
+	0x00B8,
+	0xE59F,
+	0x05B4,
+	0xE1D0,
+	0x0002,
+	0xE350,
+	0x000A,
+	0x1A00,
+	0x70AC,
+	0xE59F,
+	0x10F4,
+	0xE1D6,
+	0x26B0,
+	0xE1D7,
+	0x00F0,
+	0xE1D4,
+	0x0044,
+	0xEB00,
+	0x00B0,
+	0xE1C4,
+	0x26B0,
+	0xE1D7,
+	0x10F6,
+	0xE1D6,
+	0x00F0,
+	0xE1D5,
+	0x003F,
+	0xEB00,
+	0x00B0,
+	0xE1C5,
+	0x41F0,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x4010,
+	0xE92D,
+	0x4000,
+	0xE1A0,
+	0x1004,
+	0xE594,
+	0x0040,
+	0xE59F,
+	0x00B0,
+	0xE1D0,
+	0x0000,
+	0xE350,
+	0x0008,
+	0x0A00,
+	0x005C,
+	0xE59F,
+	0x3001,
+	0xE1A0,
+	0x2068,
+	0xE590,
+	0x0054,
+	0xE59F,
+	0x1005,
+	0xE3A0,
+	0x0032,
+	0xEB00,
+	0x0000,
+	0xE584,
+	0x4010,
+	0xE8BD,
+	0xFF1E,
+	0xE12F,
+	0x0000,
+	0xE594,
+	0x0030,
+	0xEB00,
+	0x0000,
+	0xE584,
+	0xFFF9,
+	0xEAFF,
+	0x28E8,
+	0x7000,
+	0x3370,
+	0x7000,
+	0x1272,
+	0x7000,
+	0x1728,
+	0x7000,
+	0x112C,
+	0x7000,
+	0x28EC,
+	0x7000,
+	0x122C,
+	0x7000,
+	0xF200,
+	0xD000,
+	0x2340,
+	0x7000,
+	0x0E2C,
+	0x7000,
+	0xF400,
+	0xD000,
+	0x0CDC,
+	0x7000,
+	0x20D4,
+	0x7000,
+	0x06D4,
+	0x7000,
+	0x4778,
+	0x46C0,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0xC091,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x0467,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x2FA7,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0xCB1F,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x058F,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0xA0F1,
+	0x0000,
+	0xF004,
+	0xE51F,
+	0xD14C,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x2B43,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x8725,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x6777,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x8E49,
+	0x0000,
+	0xC000,
+	0xE59F,
+	0xFF1C,
+	0xE12F,
+	0x8EDD,
+	0x0000,
+	0x96FF,
+	0x0000,
+	0x0001,
+	0x0000,
+};
+
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings4[] = {
+	{0x0028, 0x7000},
+	{0x002A, 0x0E38},
+	{0x0F12, 0x0476},
+	{0x0F12, 0x0476},
+	{0x002A, 0x0AA0},
+	{0x0F12, 0x0001},
+	{0x002A, 0x0E2C},
+	{0x0F12, 0x0001},
+	{0x002A, 0x0E66},
+	{0x0F12, 0x0001},
+	{0x002A, 0x1250},
+	{0x0F12, 0xFFFF},
+	{0x002A, 0x1202},
+	{0x0F12, 0x0010},
+	{0x002A, 0x1288},
+	{0x0F12, 0x020F},
+	{0x0F12, 0x1C02},
+	{0x0F12, 0x0006},
+	{0x002A, 0x3378},
+	{0x0F12, 0x0000},
+	{0x002A, 0x1326},
+	{0x0F12, 0x0000},
+	{0x002A, 0x063A},
+};
+
+static uint16_t s5k8aay_recommend_settings5[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x00E0,
+	0x0100,
+	0x0100,
+	0x0100,
+	0x00E0,
+	0x0100,
+	0x0100,
+	0x0100,
+	0x00C8,
+	0x0100,
+	0x0100,
+	0x0100,
+	0x00E8,
+	0x0100,
+	0x0100,
+	0x0100,
+	0x00E8,
+	0x00F8,
+	0x00F8,
+	0x0100,
+	0x00F0,
+	0x0100,
+	0x0100,
+	0x0100,
+	0x00F0,
+	0x0100,
+	0x0100,
+	0x0100,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings6[] = {
+	{0x002A, 0x067A},
+};
+
+static uint16_t s5k8aay_recommend_settings7[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings8[] = {
+	{0x002A, 0x06BA},
+	{0x0F12, 0x0001},
+	{0x002A, 0x0632},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x0100},
+	{0x002A, 0x0672},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x0100},
+	{0x002A, 0x06B2},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x06D0},
+	{0x0F12, 0x000D},
+	{0x0F12, 0x000F},
+	{0x002A, 0x06CC},
+	{0x0F12, 0x0280},
+	{0x0F12, 0x01E0},
+	{0x002A, 0x06C6},
+	{0x0F12, 0x0001},
+	{0x002A, 0x0624},
+	{0x0F12, 0x009D},
+	{0x0F12, 0x00D5},
+	{0x0F12, 0x0103},
+	{0x0F12, 0x0128},
+	{0x0F12, 0x0166},
+	{0x0F12, 0x0193},
+	{0x0F12, 0x01A0},
+	{0x002A, 0x347C},
+};
+
+static uint16_t s5k8aay_recommend_settings9[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x013B,
+	0x0116,
+	0x00D9,
+	0x00A6,
+	0x0082,
+	0x006C,
+	0x0065,
+	0x006C,
+	0x0080,
+	0x00A3,
+	0x00D4,
+	0x010D,
+	0x012E,
+	0x0138,
+	0x0104,
+	0x00BE,
+	0x0088,
+	0x0062,
+	0x004D,
+	0x0046,
+	0x004C,
+	0x0060,
+	0x0084,
+	0x00B8,
+	0x00F9,
+	0x012C,
+	0x011A,
+	0x00DB,
+	0x0093,
+	0x005F,
+	0x003C,
+	0x0027,
+	0x0020,
+	0x0026,
+	0x003A,
+	0x005C,
+	0x008E,
+	0x00D2,
+	0x010E,
+	0x0101,
+	0x00BF,
+	0x0077,
+	0x0044,
+	0x0023,
+	0x0011,
+	0x000C,
+	0x0010,
+	0x0022,
+	0x0043,
+	0x0074,
+	0x00B7,
+	0x00F7,
+	0x00FC,
+	0x00B7,
+	0x006F,
+	0x003C,
+	0x001C,
+	0x000A,
+	0x0004,
+	0x000A,
+	0x001B,
+	0x003B,
+	0x006C,
+	0x00B0,
+	0x00F2,
+	0x00EF,
+	0x00AB,
+	0x0065,
+	0x0034,
+	0x0015,
+	0x0004,
+	0x0000,
+	0x0004,
+	0x0013,
+	0x0033,
+	0x0063,
+	0x00A5,
+	0x00E5,
+	0x00F7,
+	0x00B4,
+	0x006D,
+	0x003C,
+	0x001C,
+	0x000B,
+	0x0005,
+	0x000A,
+	0x001B,
+	0x003B,
+	0x006B,
+	0x00AD,
+	0x00ED,
+	0x010B,
+	0x00CB,
+	0x0085,
+	0x0051,
+	0x002F,
+	0x001C,
+	0x0016,
+	0x001C,
+	0x002E,
+	0x004F,
+	0x0081,
+	0x00C4,
+	0x0102,
+	0x0119,
+	0x00DF,
+	0x009B,
+	0x0067,
+	0x0045,
+	0x0030,
+	0x0029,
+	0x002F,
+	0x0043,
+	0x0066,
+	0x0098,
+	0x00D9,
+	0x010F,
+	0x0138,
+	0x010C,
+	0x00CB,
+	0x0097,
+	0x0073,
+	0x005C,
+	0x0054,
+	0x005B,
+	0x0070,
+	0x0096,
+	0x00C9,
+	0x0106,
+	0x012D,
+	0x0147,
+	0x012F,
+	0x00F8,
+	0x00C5,
+	0x00A1,
+	0x008B,
+	0x0083,
+	0x008B,
+	0x00A0,
+	0x00C2,
+	0x00F3,
+	0x0124,
+	0x0139,
+	0x0093,
+	0x007E,
+	0x0062,
+	0x004D,
+	0x003E,
+	0x0034,
+	0x0030,
+	0x0032,
+	0x003B,
+	0x0049,
+	0x005C,
+	0x0077,
+	0x008A,
+	0x0093,
+	0x0077,
+	0x0059,
+	0x0042,
+	0x0032,
+	0x0027,
+	0x0024,
+	0x0026,
+	0x002F,
+	0x003D,
+	0x0052,
+	0x006E,
+	0x008B,
+	0x0083,
+	0x0064,
+	0x0046,
+	0x0030,
+	0x0020,
+	0x0016,
+	0x0011,
+	0x0014,
+	0x001E,
+	0x002D,
+	0x0041,
+	0x005D,
+	0x007C,
+	0x0077,
+	0x0057,
+	0x0039,
+	0x0024,
+	0x0014,
+	0x000A,
+	0x0007,
+	0x0009,
+	0x0012,
+	0x0021,
+	0x0036,
+	0x0051,
+	0x0070,
+	0x0077,
+	0x0056,
+	0x0038,
+	0x0022,
+	0x0013,
+	0x0009,
+	0x0005,
+	0x0008,
+	0x0011,
+	0x0020,
+	0x0035,
+	0x0051,
+	0x0071,
+	0x006E,
+	0x004E,
+	0x0032,
+	0x001C,
+	0x000D,
+	0x0004,
+	0x0000,
+	0x0003,
+	0x000B,
+	0x001A,
+	0x002F,
+	0x0049,
+	0x0068,
+	0x0072,
+	0x0053,
+	0x0037,
+	0x0021,
+	0x0012,
+	0x0009,
+	0x0005,
+	0x0008,
+	0x0010,
+	0x001F,
+	0x0034,
+	0x004E,
+	0x006C,
+	0x007F,
+	0x0060,
+	0x0043,
+	0x002D,
+	0x001D,
+	0x0013,
+	0x0010,
+	0x0013,
+	0x001C,
+	0x002B,
+	0x0040,
+	0x005A,
+	0x0079,
+	0x0082,
+	0x0066,
+	0x0049,
+	0x0035,
+	0x0025,
+	0x001B,
+	0x0017,
+	0x0019,
+	0x0023,
+	0x0033,
+	0x0046,
+	0x0060,
+	0x007B,
+	0x0092,
+	0x007C,
+	0x0060,
+	0x004B,
+	0x003C,
+	0x0032,
+	0x002D,
+	0x0030,
+	0x0039,
+	0x0049,
+	0x005D,
+	0x0076,
+	0x008C,
+	0x009F,
+	0x008F,
+	0x0077,
+	0x0061,
+	0x0052,
+	0x0048,
+	0x0043,
+	0x0047,
+	0x0050,
+	0x005E,
+	0x0071,
+	0x0086,
+	0x0097,
+	0x0093,
+	0x007C,
+	0x005F,
+	0x0049,
+	0x003A,
+	0x0030,
+	0x002C,
+	0x002F,
+	0x0037,
+	0x0045,
+	0x005A,
+	0x0075,
+	0x008A,
+	0x0094,
+	0x0077,
+	0x0057,
+	0x0040,
+	0x002F,
+	0x0024,
+	0x0020,
+	0x0023,
+	0x002D,
+	0x003B,
+	0x0051,
+	0x006E,
+	0x008C,
+	0x0085,
+	0x0066,
+	0x0046,
+	0x002F,
+	0x001F,
+	0x0014,
+	0x000F,
+	0x0012,
+	0x001C,
+	0x002B,
+	0x0040,
+	0x005C,
+	0x007D,
+	0x007A,
+	0x005A,
+	0x003A,
+	0x0024,
+	0x0014,
+	0x0009,
+	0x0006,
+	0x0008,
+	0x0011,
+	0x0020,
+	0x0036,
+	0x0051,
+	0x0072,
+	0x007B,
+	0x0059,
+	0x003A,
+	0x0023,
+	0x0012,
+	0x0008,
+	0x0004,
+	0x0007,
+	0x000F,
+	0x001F,
+	0x0035,
+	0x0051,
+	0x0072,
+	0x0073,
+	0x0053,
+	0x0034,
+	0x001D,
+	0x000E,
+	0x0004,
+	0x0000,
+	0x0002,
+	0x000A,
+	0x001A,
+	0x002F,
+	0x004A,
+	0x006A,
+	0x0077,
+	0x0058,
+	0x0039,
+	0x0022,
+	0x0012,
+	0x0008,
+	0x0004,
+	0x0007,
+	0x000F,
+	0x001E,
+	0x0034,
+	0x004F,
+	0x006F,
+	0x0083,
+	0x0064,
+	0x0045,
+	0x002E,
+	0x001D,
+	0x0012,
+	0x000F,
+	0x0011,
+	0x001A,
+	0x002A,
+	0x003F,
+	0x005B,
+	0x007B,
+	0x0087,
+	0x006A,
+	0x004B,
+	0x0036,
+	0x0025,
+	0x0019,
+	0x0015,
+	0x0017,
+	0x0022,
+	0x0031,
+	0x0045,
+	0x0060,
+	0x007D,
+	0x0096,
+	0x007F,
+	0x0061,
+	0x004B,
+	0x003B,
+	0x002F,
+	0x002A,
+	0x002D,
+	0x0036,
+	0x0046,
+	0x005B,
+	0x0075,
+	0x008D,
+	0x00A1,
+	0x0091,
+	0x0077,
+	0x0060,
+	0x0050,
+	0x0044,
+	0x0040,
+	0x0043,
+	0x004C,
+	0x005A,
+	0x006D,
+	0x0084,
+	0x0094,
+	0x0072,
+	0x0063,
+	0x004C,
+	0x003A,
+	0x002D,
+	0x0025,
+	0x0023,
+	0x0025,
+	0x002C,
+	0x0038,
+	0x004A,
+	0x005F,
+	0x006B,
+	0x0079,
+	0x0065,
+	0x004A,
+	0x0037,
+	0x0029,
+	0x0021,
+	0x001D,
+	0x001F,
+	0x0027,
+	0x0033,
+	0x0044,
+	0x005E,
+	0x006E,
+	0x006A,
+	0x0055,
+	0x003A,
+	0x0028,
+	0x001A,
+	0x0011,
+	0x000D,
+	0x000F,
+	0x0017,
+	0x0024,
+	0x0035,
+	0x004E,
+	0x0061,
+	0x0061,
+	0x004A,
+	0x0031,
+	0x001E,
+	0x0011,
+	0x0008,
+	0x0005,
+	0x0007,
+	0x000E,
+	0x001B,
+	0x002D,
+	0x0045,
+	0x0059,
+	0x0062,
+	0x004B,
+	0x0031,
+	0x001E,
+	0x0010,
+	0x0008,
+	0x0004,
+	0x0006,
+	0x000E,
+	0x001B,
+	0x002E,
+	0x0046,
+	0x005A,
+	0x005B,
+	0x0045,
+	0x002C,
+	0x001A,
+	0x000C,
+	0x0003,
+	0x0000,
+	0x0002,
+	0x0009,
+	0x0016,
+	0x0029,
+	0x0040,
+	0x0054,
+	0x005F,
+	0x004A,
+	0x0031,
+	0x001F,
+	0x0010,
+	0x0008,
+	0x0004,
+	0x0007,
+	0x000E,
+	0x001B,
+	0x002E,
+	0x0045,
+	0x0059,
+	0x006C,
+	0x0057,
+	0x003E,
+	0x002A,
+	0x001B,
+	0x0012,
+	0x000F,
+	0x0011,
+	0x0019,
+	0x0027,
+	0x0039,
+	0x0050,
+	0x0063,
+	0x006F,
+	0x005C,
+	0x0044,
+	0x0031,
+	0x0023,
+	0x0019,
+	0x0016,
+	0x0017,
+	0x0020,
+	0x002E,
+	0x0040,
+	0x0055,
+	0x0064,
+	0x007E,
+	0x0071,
+	0x0059,
+	0x0046,
+	0x0039,
+	0x002F,
+	0x002A,
+	0x002D,
+	0x0035,
+	0x0043,
+	0x0054,
+	0x0069,
+	0x0074,
+	0x0083,
+	0x007D,
+	0x0068,
+	0x0055,
+	0x0048,
+	0x003E,
+	0x003A,
+	0x003D,
+	0x0045,
+	0x0051,
+	0x0061,
+	0x0072,
+	0x0077,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings10[] = {
+	{0x002A, 0x1348},
+	{0x0F12, 0x0001},
+	{0x002A, 0x1278},
+	{0x0F12, 0xAAF0},
+	{0x002A, 0x3370},
+	{0x0F12, 0x0000},
+	{0x002A, 0x0D2A},
+	{0x0F12, 0x0450},
+	{0x0F12, 0x0400},
+	{0x0F12, 0x0900},
+	{0x002A, 0x0B36},
+	{0x0F12, 0x0005},
+	{0x002A, 0x0B3A},
+	{0x0F12, 0x00B4},
+	{0x0F12, 0x02C1},
+	{0x002A, 0x0B38},
+	{0x0F12, 0x0012},
+	{0x002A, 0x0AE6},
+};
+
+static uint16_t s5k8aay_recommend_settings11[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x03EF,
+	0x0434,
+	0x03A1,
+	0x0439,
+	0x0379,
+	0x043E,
+	0x0350,
+	0x0429,
+	0x0327,
+	0x03E5,
+	0x02F9,
+	0x03BE,
+	0x02D2,
+	0x036D,
+	0x02C1,
+	0x0324,
+	0x02AB,
+	0x02FF,
+	0x028C,
+	0x02F1,
+	0x0276,
+	0x02D7,
+	0x0261,
+	0x02C4,
+	0x023A,
+	0x02A5,
+	0x020C,
+	0x0288,
+	0x01E5,
+	0x026A,
+	0x01D8,
+	0x0250,
+	0x01DF,
+	0x022C,
+	0x0209,
+	0x01D3,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings12[] = {
+	{0x002A, 0x0BAA},
+	{0x0F12, 0x0006},
+	{0x002A, 0x0BAE},
+	{0x0F12, 0x0095},
+	{0x0F12, 0x02E0},
+	{0x002A, 0x0BAC},
+	{0x0F12, 0x000B},
+	{0x002A, 0x0B7A},
+};
+
+static uint16_t s5k8aay_recommend_settings13[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0401,
+	0x0446,
+	0x037F,
+	0x044C,
+	0x033B,
+	0x0446,
+	0x02D7,
+	0x03FD,
+	0x02A6,
+	0x03C0,
+	0x026A,
+	0x0335,
+	0x0229,
+	0x0300,
+	0x01D6,
+	0x02C3,
+	0x01C6,
+	0x0270,
+	0x01D5,
+	0x0231,
+	0x029D,
+	0x016F,
+	0x0000,
+	0x0000,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings14[] = {
+	{0x002A, 0x0B70},
+	{0x0F12, 0x0005},
+	{0x002A, 0x0B74},
+	{0x0F12, 0x022B},
+	{0x0F12, 0x0294},
+	{0x002A, 0x0B72},
+	{0x0F12, 0x0005},
+	{0x002A, 0x0B40},
+};
+
+static uint16_t s5k8aay_recommend_settings15[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0280,
+	0x0297,
+	0x0259,
+	0x028E,
+	0x023D,
+	0x0275,
+	0x0235,
+	0x0257,
+	0x0240,
+	0x0220,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+};
+
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings16[] = {
+	{0x002A, 0x0BC8},
+	{0x0F12, 0x0005},
+	{0x002A, 0x0BCC},
+	{0x0F12, 0x0145},
+	{0x0F12, 0x01A5},
+	{0x002A, 0x0BCA},
+	{0x0F12, 0x0004},
+	{0x002A, 0x0BB4},
+};
+
+static uint16_t s5k8aay_recommend_settings17[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x03C2,
+	0x03E6,
+	0x0384,
+	0x03E5,
+	0x034A,
+	0x03B3,
+	0x0340,
+	0x0362,
+	0x0000,
+	0x0000,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings18[] = {
+	{0x002A, 0x0BE6},
+	{0x0F12, 0x0006},
+	{0x002A, 0x0BEA},
+	{0x0F12, 0x01BF},
+	{0x0F12, 0x022A},
+	{0x002A, 0x0BE8},
+	{0x0F12, 0x0003},
+	{0x002A, 0x0BD2},
+};
+
+static uint16_t s5k8aay_recommend_settings19[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x030B,
+	0x032F,
+	0x02C0,
+	0x0305,
+	0x029E,
+	0x02AC,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings20[] = {
+	{0x002A, 0x0C2C},
+	{0x0F12, 0x0139},
+	{0x0F12, 0x0122},
+	{0x002A, 0x0BFC},
+};
+
+static uint16_t s5k8aay_recommend_settings21[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x03AD,
+	0x013F,
+	0x0341,
+	0x017B,
+	0x038D,
+	0x014B,
+	0x02C3,
+	0x01CC,
+	0x0241,
+	0x027F,
+	0x0241,
+	0x027F,
+	0x0214,
+	0x02A8,
+	0x0295,
+	0x0210,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings22[] = {
+	{0x002A, 0x0C4C},
+	{0x0F12, 0x0472},
+	{0x002A, 0x0C58},
+	{0x0F12, 0x057C},
+	{0x002A, 0x0BF8},
+	{0x0F12, 0x018A},
+	{0x002A, 0x0BF4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x0CAC},
+	{0x0F12, 0x0050},
+	{0x002A, 0x0C28},
+	{0x0F12, 0x0000},
+	{0x002A, 0x20BA},
+	{0x0F12, 0x0006},
+	{0x002A, 0x0D0E},
+	{0x0F12, 0x00B5},
+	{0x0F12, 0x00B5},
+	{0x002A, 0x0CFE},
+	{0x0F12, 0x0E58},
+	{0x0F12, 0x0F2C},
+	{0x0F12, 0x1000},
+	{0x0F12, 0x10D4},
+	{0x0F12, 0x11A8},
+	{0x0F12, 0x127C},
+	{0x0F12, 0x00B5},
+	{0x0F12, 0x00B5},
+	{0x002A, 0x0CF8},
+	{0x0F12, 0x027C},
+	{0x0F12, 0x0351},
+	{0x0F12, 0x0425},
+	{0x002A, 0x0CB0},
+};
+
+static uint16_t s5k8aay_recommend_settings23[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x0000,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings24[] = {
+	{0x002A, 0x0D30},
+	{0x0F12, 0x0002},
+	{0x002A, 0x3372},
+	{0x0F12, 0x0001},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x0C86},
+	{0x0F12, 0x0005},
+	{0x002A, 0x0C70},
+};
+
+static uint16_t s5k8aay_recommend_settings25[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0xFF7B,
+	0x00CE,
+	0xFF23,
+	0x010D,
+	0xFEF3,
+	0x012C,
+	0xFED7,
+	0x014E,
+	0xFEBB,
+	0x0162,
+	0x1388,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings26[] = {
+	{0x002A, 0x0C8A},
+	{0x0F12, 0x4ACB},
+	{0x002A, 0x0C88},
+	{0x0F12, 0x0A7C},
+	{0x002A, 0x0CA0},
+	{0x0F12, 0x0030},
+	{0x002A, 0x0CA4},
+	{0x0F12, 0x0030},
+	{0x0F12, 0x0180},
+	{0x0F12, 0x0002},
+	{0x002A, 0x012E},
+	{0x0F12, 0x5DC0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x0146},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x014C},
+	{0x0F12, 0x34BC},
+	{0x002A, 0x0152},
+	{0x0F12, 0x6978},
+	{0x002A, 0x014E},
+	{0x0F12, 0x6979},
+	{0x002A, 0x0164},
+	{0x0F12, 0x0001},
+	{0x002A, 0x0ABC},
+	{0x0F12, 0x0000},
+	{0x002A, 0x0AD0},
+	{0x0F12, 0x0080},
+	{0x002A, 0x0408},
+	{0x0F12, 0x067F},
+	{0x002A, 0x0D40},
+	{0x0F12, 0x0039},
+	{0x002A, 0x0D46},
+	{0x0F12, 0x000F},
+	{0x002A, 0x0440},
+	{0x0F12, 0x3410},
+	{0x002A, 0x0444},
+	{0x0F12, 0x6820},
+	{0x002A, 0x0448},
+	{0x0F12, 0x8227},
+	{0x002A, 0x044C},
+	{0x0F12, 0xD090},
+	{0x0F12, 0x0003},
+	{0x002A, 0x0450},
+	{0x0F12, 0x3410},
+	{0x002A, 0x0454},
+	{0x0F12, 0x6820},
+	{0x002A, 0x0458},
+	{0x0F12, 0x8227},
+	{0x002A, 0x045C},
+	{0x0F12, 0xD090},
+	{0x0F12, 0x0003},
+	{0x002A, 0x0460},
+	{0x0F12, 0x01B0},
+	{0x0F12, 0x01B0},
+	{0x0F12, 0x0280},
+	{0x0F12, 0x0A80},
+	{0x0F12, 0x0100},
+	{0x0F12, 0x3000},
+	{0x002A, 0x042E},
+	{0x0F12, 0x010E},
+	{0x0F12, 0x00F5},
+	{0x002A, 0x0DE0},
+	{0x0F12, 0x0002},
+	{0x002A, 0x0D4E},
+};
+
+static uint16_t s5k8aay_recommend_settings27[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0000,
+	0x0101,
+	0x0101,
+	0x0000,
+	0x0101,
+	0x0101,
+	0x0101,
+	0x0101,
+	0x0201,
+	0x0303,
+	0x0303,
+	0x0102,
+	0x0201,
+	0x0403,
+	0x0304,
+	0x0102,
+	0x0201,
+	0x0403,
+	0x0304,
+	0x0102,
+	0x0201,
+	0x0403,
+	0x0304,
+	0x0102,
+	0x0201,
+	0x0303,
+	0x0303,
+	0x0102,
+	0x0201,
+	0x0202,
+	0x0202,
+	0x0102,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings28[] = {
+	{0x002A, 0x33A4},
+};
+
+static uint16_t s5k8aay_recommend_settings29[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x01D0,
+	0xFFA1,
+	0xFFFA,
+	0xFF6F,
+	0x0140,
+	0xFF49,
+	0xFFC1,
+	0x001F,
+	0x01BD,
+	0x013F,
+	0x00E1,
+	0xFF43,
+	0x0191,
+	0xFFC0,
+	0x01B7,
+	0xFF30,
+	0x015F,
+	0x0106,
+	0x01D0,
+	0xFFA1,
+	0xFFFA,
+	0xFF6F,
+	0x0140,
+	0xFF49,
+	0xFFC1,
+	0x001F,
+	0x01BD,
+	0x013F,
+	0x00E1,
+	0xFF43,
+	0x0191,
+	0xFFC0,
+	0x01B7,
+	0xFF30,
+	0x015F,
+	0x0106,
+	0x01D0,
+	0xFFA1,
+	0xFFFA,
+	0xFF6F,
+	0x0140,
+	0xFF49,
+	0xFFC1,
+	0x001F,
+	0x01BD,
+	0x013F,
+	0x00E1,
+	0xFF43,
+	0x0191,
+	0xFFC0,
+	0x01B7,
+	0xFF30,
+	0x015F,
+	0x0106,
+	0x01D0,
+	0xFFA1,
+	0xFFFA,
+	0xFF6F,
+	0x0140,
+	0xFF49,
+	0xFFC1,
+	0x001F,
+	0x01BD,
+	0x013F,
+	0x00E1,
+	0xFF43,
+	0x0191,
+	0xFFC0,
+	0x01B7,
+	0xFF30,
+	0x015F,
+	0x0106,
+	0x01BF,
+	0xFFBF,
+	0xFFFE,
+	0xFF6D,
+	0x01B4,
+	0xFF66,
+	0xFFCA,
+	0xFFCE,
+	0x017B,
+	0x0136,
+	0x0132,
+	0xFF85,
+	0x018B,
+	0xFF73,
+	0x0191,
+	0xFF3F,
+	0x015B,
+	0x00D0,
+	0x01BF,
+	0xFFBF,
+	0xFFFE,
+	0xFF6D,
+	0x01B4,
+	0xFF66,
+	0xFFCA,
+	0xFFCE,
+	0x017B,
+	0x0136,
+	0x0132,
+	0xFF85,
+	0x018B,
+	0xFF73,
+	0x0191,
+	0xFF3F,
+	0x015B,
+	0x00D0,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings30[] = {
+	{0x002A, 0x3380},
+};
+
+static uint16_t s5k8aay_recommend_settings31[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x01AC,
+	0xFFD7,
+	0x0019,
+	0xFF49,
+	0x01D9,
+	0xFF63,
+	0xFFCA,
+	0xFFCE,
+	0x017B,
+	0x0132,
+	0x012E,
+	0xFF8D,
+	0x018B,
+	0xFF73,
+	0x0191,
+	0xFF3F,
+	0x015B,
+	0x00D0,
+};
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings32[] = {
+	{0x002A, 0x0612},
+	{0x0F12, 0x009D},
+	{0x0F12, 0x00D5},
+	{0x0F12, 0x0103},
+	{0x0F12, 0x0128},
+	{0x0F12, 0x0166},
+	{0x0F12, 0x0193},
+	{0x002A, 0x0538},
+};
+
+static uint16_t s5k8aay_recommend_settings33[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0000,
+	0x001F,
+	0x0035,
+	0x005A,
+	0x0095,
+	0x00E6,
+	0x0121,
+	0x0139,
+	0x0150,
+	0x0177,
+	0x019A,
+	0x01BB,
+	0x01DC,
+	0x0219,
+	0x0251,
+	0x02B3,
+	0x030A,
+	0x035F,
+	0x03B1,
+	0x03FF,
+	0x0000,
+	0x0001,
+	0x0001,
+	0x0002,
+	0x0004,
+	0x000A,
+	0x0012,
+	0x0016,
+	0x001A,
+	0x0024,
+	0x0031,
+	0x003E,
+	0x004E,
+	0x0075,
+	0x00A8,
+	0x0126,
+	0x01BE,
+	0x0272,
+	0x0334,
+	0x03FF,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings34[] = {
+	{0x002A, 0x0498},
+};
+
+static uint16_t s5k8aay_recommend_settings35[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0000,
+	0x0002,
+	0x0007,
+	0x001D,
+	0x006E,
+	0x00D3,
+	0x0127,
+	0x014C,
+	0x016E,
+	0x01A5,
+	0x01D3,
+	0x01FB,
+	0x021F,
+	0x0260,
+	0x029A,
+	0x02F7,
+	0x034D,
+	0x0395,
+	0x03CE,
+	0x03FF,
+	0x0000,
+	0x0004,
+	0x000C,
+	0x0024,
+	0x006E,
+	0x00D1,
+	0x0119,
+	0x0139,
+	0x0157,
+	0x018E,
+	0x01C3,
+	0x01F3,
+	0x021F,
+	0x0269,
+	0x02A6,
+	0x02FF,
+	0x0351,
+	0x0395,
+	0x03CE,
+	0x03FF,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings36[] = {
+	{0x002A, 0x06D4},
+	{0x0F12, 0x0032},
+	{0x0F12, 0x0078},
+	{0x0F12, 0x00C8},
+	{0x0F12, 0x0190},
+	{0x0F12, 0x028C},
+	{0x002A, 0x0734},
+};
+
+static uint16_t s5k8aay_recommend_settings37[] = {
+	S5K8AAY_REG_BURST_ADDR,
+	0x0000,
+	0x0000,
+	0x000F,
+	0x0005,
+	0x0000,
+	0x0078,
+	0x012C,
+	0x03FF,
+	0x0014,
+	0x0064,
+	0x000C,
+	0x0010,
+	0x01E6,
+	0x0000,
+	0x0070,
+	0x01FF,
+	0x0144,
+	0x000F,
+	0x000A,
+	0x0073,
+	0x0087,
+	0x0014,
+	0x000A,
+	0x0023,
+	0x001E,
+	0x0014,
+	0x000A,
+	0x0023,
+	0x0046,
+	0x2B32,
+	0x0601,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x00FF,
+	0x07FF,
+	0xFFFF,
+	0x0000,
+	0x050D,
+	0x1E80,
+	0x0000,
+	0x1408,
+	0x0214,
+	0xFF01,
+	0x180F,
+	0x0001,
+	0x0000,
+	0x8003,
+	0x0080,
+	0x0080,
+	0x0180,
+	0x0308,
+	0xFFFF,
+	0xFFFF,
+	0x0A02,
+	0x080A,
+	0x0500,
+	0x032D,
+	0x324E,
+	0xFF1E,
+	0x02FF,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x4646,
+	0x0802,
+	0x0802,
+	0x0000,
+	0x030F,
+	0x3202,
+	0x0F1E,
+	0x020F,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x4646,
+	0x0802,
+	0x0802,
+	0x0000,
+	0x030F,
+	0x3202,
+	0x0F1E,
+	0x020F,
+	0x0003,
+	0x0000,
+	0x0000,
+	0x000F,
+	0x0005,
+	0x0000,
+	0x006A,
+	0x012C,
+	0x03FF,
+	0x0014,
+	0x0064,
+	0x000C,
+	0x0010,
+	0x01E6,
+	0x03FF,
+	0x0070,
+	0x007D,
+	0x0064,
+	0x0014,
+	0x000A,
+	0x0073,
+	0x0087,
+	0x0014,
+	0x000A,
+	0x0023,
+	0x001E,
+	0x0014,
+	0x000A,
+	0x0023,
+	0x001E,
+	0x2B32,
+	0x0601,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x00FF,
+	0x07FF,
+	0xFFFF,
+	0x0000,
+	0x050D,
+	0x1E80,
+	0x0000,
+	0x1408,
+	0x0214,
+	0xFF01,
+	0x180F,
+	0x0002,
+	0x0000,
+	0x8003,
+	0x008C,
+	0x0080,
+	0x0180,
+	0x0308,
+	0x1E65,
+	0x1A24,
+	0x0A03,
+	0x080A,
+	0x0500,
+	0x032D,
+	0x324D,
+	0xFF1E,
+	0x02FF,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x2F34,
+	0x0504,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x1414,
+	0x0504,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0003,
+	0x0000,
+	0x0000,
+	0x000F,
+	0x0005,
+	0x0000,
+	0x0064,
+	0x012C,
+	0x03FF,
+	0x0014,
+	0x0064,
+	0x000C,
+	0x0010,
+	0x01E6,
+	0x03FF,
+	0x0070,
+	0x007D,
+	0x0064,
+	0x0032,
+	0x0096,
+	0x0073,
+	0x0087,
+	0x0014,
+	0x0019,
+	0x0023,
+	0x001E,
+	0x0014,
+	0x0019,
+	0x0023,
+	0x001E,
+	0x2B32,
+	0x0601,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x00FF,
+	0x07FF,
+	0xFFFF,
+	0x0000,
+	0x050D,
+	0x1E80,
+	0x0000,
+	0x0A08,
+	0x0200,
+	0xFF01,
+	0x180F,
+	0x0002,
+	0x0000,
+	0x8003,
+	0x008C,
+	0x0080,
+	0x0180,
+	0x0208,
+	0x1E4B,
+	0x1A24,
+	0x0A05,
+	0x080A,
+	0x0500,
+	0x032D,
+	0x324D,
+	0x001E,
+	0x0200,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x1E23,
+	0x0505,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x1E23,
+	0x0505,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0003,
+	0x0000,
+	0x0000,
+	0x000F,
+	0x0007,
+	0x0000,
+	0x0064,
+	0x012C,
+	0x03FF,
+	0x0014,
+	0x0064,
+	0x000C,
+	0x0010,
+	0x01E6,
+	0x0000,
+	0x0070,
+	0x007D,
+	0x0064,
+	0x0032,
+	0x0096,
+	0x0073,
+	0x009F,
+	0x0028,
+	0x0028,
+	0x0023,
+	0x0037,
+	0x0028,
+	0x0028,
+	0x0023,
+	0x0037,
+	0x2B32,
+	0x0601,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x00FF,
+	0x07A0,
+	0xFFFF,
+	0x0000,
+	0x050D,
+	0x1E80,
+	0x0000,
+	0x0A08,
+	0x0200,
+	0xFF01,
+	0x180F,
+	0x0001,
+	0x0000,
+	0x8003,
+	0x008C,
+	0x0080,
+	0x0180,
+	0x0108,
+	0x1E32,
+	0x1A24,
+	0x0A05,
+	0x080A,
+	0x0000,
+	0x0328,
+	0x324C,
+	0x001E,
+	0x0200,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x0F0F,
+	0x0307,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0103,
+	0x010C,
+	0x9696,
+	0x0F0F,
+	0x0307,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0003,
+	0x0000,
+	0x0000,
+	0x000F,
+	0x0007,
+	0x0000,
+	0x0028,
+	0x012C,
+	0x03FF,
+	0x0014,
+	0x0064,
+	0x000C,
+	0x0010,
+	0x01E6,
+	0x0000,
+	0x0070,
+	0x0087,
+	0x0073,
+	0x0032,
+	0x0096,
+	0x0073,
+	0x00B4,
+	0x0028,
+	0x0028,
+	0x0023,
+	0x0046,
+	0x0028,
+	0x0028,
+	0x0023,
+	0x0046,
+	0x2B23,
+	0x0601,
+	0x0000,
+	0x0000,
+	0x0000,
+	0x00FF,
+	0x0B84,
+	0xFFFF,
+	0x0000,
+	0x050D,
+	0x1E80,
+	0x0000,
+	0x0A08,
+	0x0200,
+	0xFF01,
+	0x180F,
+	0x0001,
+	0x0000,
+	0x8003,
+	0x008C,
+	0x0080,
+	0x0180,
+	0x0108,
+	0x1E1E,
+	0x1419,
+	0x0A0A,
+	0x0800,
+	0x0000,
+	0x0328,
+	0x324C,
+	0x001E,
+	0x0200,
+	0x0103,
+	0x010C,
+	0x6464,
+	0x0F0F,
+	0x0307,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0103,
+	0x010C,
+	0x6464,
+	0x0F0F,
+	0x0307,
+	0x080F,
+	0x0000,
+	0x030F,
+	0x3208,
+	0x0F1E,
+	0x020F,
+	0x0003,
+	0x7F5E,
+	0xFEEE,
+	0xD9B7,
+	0x0472,
+	0x0001,
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings38[] = {
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+	{0x0028, 0xD000},
+	{0x002A, 0x1000},
+	{0x0F12, 0x0001},
+};
+
+//static struct msm_camera_i2c_reg_conf s5k8aay_start_stream_settings3[] = {
+//static struct msm_camera_i2c_reg_conf s5k8aay_frame_rate_settings1[] = {
+//	{0xFCFC, 0xD000},
+//	{0x0028, 0x7000},
+//	{0x002A, 0x01D2},
+//	{0x0F12, 0x0001},
+//	{0x002A, 0x01D8},
+//	{0x0F12, 0x00A7},
+//	{0x002A, 0x01D6},
+//	{0x0F12, 0x0000},
+//	{0x002A, 0x02AE},
+//	{0x0F12, 0x0001},
+//	{0x002A, 0x02C4},
+//	{0x0F12, 0x0001},
+//	{0x002A, 0x02CA},
+//	{0x0F12, 0x014D},
+//	{0x002A, 0x02C8},
+//	{0x0F12, 0x0000},
+//};
+
+//static struct msm_camera_i2c_reg_conf s5k8aay_start_stream_settings4[] = {
+//static struct msm_camera_i2c_reg_conf s5k8aay_frame_rate_settings2[] = {
+//	{0xFCFC, 0xD000},
+//	{0x0028, 0x7000},
+//	{0x002A, 0x01A8},
+//	{0x0F12, 0x0000},
+//	{0x002A, 0x01B0},
+//	{0x0F12, 0x0000},
+//	{0x0F12, 0x0001},
+//	{0x002A, 0x01A2},
+//	{0x0F12, 0x0001},
+//	{0x0F12, 0x0001},
+//};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_config_exposure_settings[S5K8AAY_EXPOSURE_TBL_SIZE][S5K8AAY_EXPOSURE_SETTING_SIZE] = {
+	/* -6 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+		{0x0F12, 0xFF94},
+	},
+	/* -5 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0xFF81},
+		{0x0F12, 0xFFA6},
+	},
+	/* -4 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0xFF9C},
+		{0x0F12, 0xFFB8},
+	},
+	/* -3 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0xFFB5},
+		{0x0F12, 0xFFCA},
+	},
+	/* -2 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0xFFCE},
+		{0x0F12, 0xFFDC},
+	},
+	/* -1 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0xFFE7},
+		{0x0F12, 0xFFEE},
+	},
+	/* 0 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+		{0x0F12, 0x0000},
+	},
+	/* 1 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0x0019},
+		{0x0F12, 0x0012},
+	},
+	/* 2 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0x0032},
+		{0x0F12, 0x0024},
+	},
+	/* 3 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0x004B},
+		{0x0F12, 0x0036},
+	},
+	/* 4 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0x0064},
+		{0x0F12, 0x0048},
+	},
+	/* 5 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+//		{0x0F12, 0x007F},
+		{0x0F12, 0x005A},
+	},
+	/* 6 */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x018E},
+		{0x0F12, 0x006C},
+	},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_config_white_balance_settings[S5K8AAY_WB_MAX][S5K8AAY_WB_SETTING_SIZE] = {
+	/* S5K8AAY_WB_AUTO */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x2162},
+		{0x0F12, 0x0001},
+		{0x002A, 0x03DA},
+		{0x0F12, 0x0000},
+		{0x0F12, 0x0000},
+		{0x0F12, 0x0000},
+		{0x0F12, 0x0000},
+		{0x0F12, 0x0000},
+		{0x0F12, 0x0000},
+	},
+	/* S5K8AAY_WB_DAYLIGHT */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x2162},
+		{0x0F12, 0x0000},
+		{0x002A, 0x03DA},
+		{0x0F12, 0x05D0},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x0400},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x05A0},
+		{0x0F12, 0x0001},
+	},
+	/* S5K8AAY_WB_FLUORESCENT */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x2162},
+		{0x0F12, 0x0000},
+		{0x002A, 0x03DA},
+		{0x0F12, 0x04C8},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x0400},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x0818},
+		{0x0F12, 0x0001},
+	},
+	/* S5K8AAY_WB_CLOUDY_DAYLIGHT */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x2162},
+		{0x0F12, 0x0000},
+		{0x002A, 0x03DA},
+		{0x0F12, 0x0500},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x0400},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x0600},
+		{0x0F12, 0x0001},
+	},
+	/* S5K8AAY_WB_INCANDESCENT */
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x2162},
+		{0x0F12, 0x0000},
+		{0x002A, 0x03DA},
+		{0x0F12, 0x0400},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x04B1},
+		{0x0F12, 0x0001},
+		{0x0F12, 0x0C30},
+		{0x0F12, 0x0001},
+	},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_start_stream_settings[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0xD000},
+	{0x002A, 0xC100},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_stop_stream_settings[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0xD000},
+	{0x002A, 0xC100},
+	{0x0F12, 0x0000},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_exp_time_settings[] = {
+	{0xFCFC, 0xD000},
+	{0x002C, 0x7000},
+/*	{0x002E, 0x20DC}, */
+	{0x002E, 0x210C},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_error_check_write_reg[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x0108},
+	{0x0F12, 0x0000},
+	{0x0028, 0xD000},
+	{0x002A, 0x1002},
+	{0x0F12, 0x0000},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_error_check_reg[S5K8AAY_ERR_CHK_TBL_SIZE][S5K8AAY_ERR_CHK_TBL_REG_SIZE] = {
+	{
+		{0xFCFC, 0xD000},
+		{0x002C, 0x7000},
+		{0x002E, 0x0108},
+	},
+	{
+		{0xFCFC, 0xD000},
+		{0x002C, 0xD000},
+		{0x002E, 0x1002},
+	},
+};
+
+static struct v4l2_subdev_info s5k8aay_subdev_info[] = {
+	{
+	.code   = V4L2_MBUS_FMT_YUYV8_2X8,
+	.colorspace = V4L2_COLORSPACE_JPEG,
+	.fmt    = 1,
+	.order    = 0,
+	},
+	/* more can be supported, to be added later */
+};
+
+//static struct msm_camera_i2c_reg_conf s5k8aay_recommend_settings[] = {
+//};
+
+//static void s5k8aay_stop_stream(struct msm_sensor_ctrl_t *s_ctrl) {}
+
+//static struct msm_camera_i2c_conf_array s5k8aay_start_stream_conf[] = {
+//	{&s5k8aay_start_stream_settings1[0],
+//	ARRAY_SIZE(s5k8aay_start_stream_settings1), 1, MSM_CAMERA_I2C_WORD_DATA},
+//	{&s5k8aay_start_stream_settings2[0],
+//	ARRAY_SIZE(s5k8aay_start_stream_settings2), 10, MSM_CAMERA_I2C_WORD_DATA},
+//	{&s5k8aay_start_stream_settings3[0],
+//	ARRAY_SIZE(s5k8aay_start_stream_settings3), 10, MSM_CAMERA_I2C_WORD_DATA},
+//	{&s5k8aay_start_stream_settings4[0],
+//	ARRAY_SIZE(s5k8aay_start_stream_settings4), 10, MSM_CAMERA_I2C_WORD_DATA},
+//};
+static struct msm_camera_i2c_conf_array s5k8aay_init_conf[] = {
+	{&s5k8aay_recommend_settings1[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings1), 1, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings2[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings2), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings3[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings3), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings4[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings4), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings5[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings5), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings6[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings6), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings7[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings7), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings8[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings8), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings9[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings9), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings10[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings10), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings11[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings11), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings12[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings12), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings13[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings13), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings14[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings14), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings15[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings15), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings16[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings16), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings17[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings17), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings18[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings18), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings19[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings19), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings20[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings20), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings21[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings21), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings22[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings22), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings23[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings23), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings24[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings24), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings25[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings25), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings26[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings26), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings27[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings27), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings28[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings28), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings29[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings29), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings30[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings30), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings31[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings31), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings32[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings32), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings33[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings33), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings34[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings34), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings35[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings35), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings36[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings36), 0, MSM_CAMERA_I2C_WORD_DATA},
+	{&s5k8aay_recommend_settings37[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings37), 0, MSM_CAMERA_I2C_BURST_DATA},
+	{&s5k8aay_recommend_settings38[0],
+	ARRAY_SIZE(s5k8aay_recommend_settings38),10, MSM_CAMERA_I2C_WORD_DATA},
+};
+
+//static struct msm_camera_i2c_conf_array s5k8aay_init_conf[] = {
+///* valied only inital data */
+//	{&s5k8aay_recommend_settings[0],
+//	ARRAY_SIZE(s5k8aay_recommend_settings), 0, MSM_CAMERA_I2C_WORD_DATA}
+//};
+
+//static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings[] = {
+//};
+//static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_sxga1[] = {
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_sxga[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+//static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_sxga2[] = {
+//	{0xFCFC, 0xD000},
+//	{0x0028, 0x7000},
+//	{0x002A, 0x01A8},
+//	{0x0F12, 0x0000},
+//	{0x002A, 0x01B0},
+//	{0x0F12, 0x0000},
+//	{0x0F12, 0x0001},
+//	{0x002A, 0x01A2},
+//	{0x0F12, 0x0001},
+//	{0x0F12, 0x0001},
+//};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_vga[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0280},
+	{0x0F12, 0x01E0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0280},
+	{0x0F12, 0x01E0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_wvga[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x0300},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0060},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x0300},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0060},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0320},
+	{0x0F12, 0x01E0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0320},
+	{0x0F12, 0x01E0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_display[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x02D0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x02D0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_hd[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x02D0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0078},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x02D0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0078},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x02D0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x02D0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_qcif_v[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0496},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0035},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0496},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0035},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x00D0},
+	{0x0F12, 0x00B0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x00D0},
+	{0x0F12, 0x00B0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_qvga_v[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0180},
+	{0x0F12, 0x0120},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0180},
+	{0x0F12, 0x0120},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_vga_v[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0300},
+	{0x0F12, 0x0240},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0300},
+	{0x0F12, 0x0240},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_wvga_v[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x0300},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0060},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x0300},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0060},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0240},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0240},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_display_v[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0480},
+	{0x0F12, 0x0360},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0480},
+	{0x0F12, 0x0360},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x014D},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_qcif[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0496},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0035},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0496},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0035},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x00B0},
+	{0x0F12, 0x0090},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x00B0},
+	{0x0F12, 0x0090},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x0535},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_prev_settings_qvga[] = {
+	{0xFCFC, 0xD000},
+	{0x0028, 0x7000},
+	{0x002A, 0x01CA},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02BC},
+	{0x0F12, 0x0500},
+	{0x0F12, 0x03C0},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01BE},
+	{0x0F12, 0x0140},
+	{0x0F12, 0x00F0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x01C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01C4},
+	{0x0F12, 0x0042},
+	{0x002A, 0x01D4},
+	{0x0F12, 0x0002},
+	{0x002A, 0x01D2},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01D8},
+	{0x0F12, 0x014D},
+	{0x002A, 0x01D6},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01E8},
+	{0x0F12, 0x0033},
+	{0x002A, 0x02B0},
+	{0x0F12, 0x0140},
+	{0x0F12, 0x00F0},
+	{0x0F12, 0x0005},
+	{0x002A, 0x02BA},
+	{0x0F12, 0x0000},
+	{0x002A, 0x02B6},
+	{0x0F12, 0x0042},
+	{0x002A, 0x02C6},
+	{0x0F12, 0x0002},
+	{0x002A, 0x02C4},
+	{0x0F12, 0x0001},
+	{0x002A, 0x02CA},
+	{0x0F12, 0x0535},
+	{0x002A, 0x02C8},
+	{0x0F12, 0x0000},
+	{0x002A, 0x01A8},
+	{0x0F12, 0x0000},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01B0},
+	{0x0F12, 0x0000},
+	{0x002A, 0x019E},
+	{0x0F12, 0x0001},
+	{0x002A, 0x01A0},
+	{0x0F12, 0x0001},
+};
+
+//static struct msm_camera_i2c_conf_array s5k8aay_confs[] = {
+//	{&s5k8aay_prev_settings[0],
+//	ARRAY_SIZE(s5k8aay_prev_settings), 0, MSM_CAMERA_I2C_WORD_DATA},
+//};
+//static struct msm_camera_i2c_conf_array s5k8aay_confs_sxga[] = {
+//	{&s5k8aay_prev_settings_sxga1[0],
+//	ARRAY_SIZE(s5k8aay_prev_settings_sxga1), 10, MSM_CAMERA_I2C_WORD_DATA},
+//	{&s5k8aay_prev_settings_sxga2[0],
+//	ARRAY_SIZE(s5k8aay_prev_settings_sxga2), 10, MSM_CAMERA_I2C_WORD_DATA},
+//};
+
+static struct msm_camera_i2c_conf_array s5k8aay_confs[] = {
+	/* SXGA */
+	{&s5k8aay_prev_settings_sxga[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_sxga), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* VGA */
+	{&s5k8aay_prev_settings_vga[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_vga), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* WVGA */
+	{&s5k8aay_prev_settings_wvga[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_wvga), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* display */
+	{&s5k8aay_prev_settings_display[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_display), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* HD */
+	{&s5k8aay_prev_settings_hd[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_hd), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* QCIF VIDEO */
+	{&s5k8aay_prev_settings_qcif_v[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_qcif_v), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* QVGA VIDEO */
+	{&s5k8aay_prev_settings_qvga_v[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_qvga_v), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* VGA VIDEO */
+	{&s5k8aay_prev_settings_vga_v[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_vga_v), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* WVGA VIDEO */
+	{&s5k8aay_prev_settings_wvga_v[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_wvga_v), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* diaplay VIDEO */
+	{&s5k8aay_prev_settings_display_v[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_display_v), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* QCIF */
+	{&s5k8aay_prev_settings_qcif[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_qcif), 10, MSM_CAMERA_I2C_WORD_DATA},
+	/* QVGA */
+	{&s5k8aay_prev_settings_qvga[0],
+	ARRAY_SIZE(s5k8aay_prev_settings_qvga), 10, MSM_CAMERA_I2C_WORD_DATA},
+};
+
+static struct msm_camera_i2c_reg_conf s5k8aay_special_effect[][8] = {
+	/*for special effect OFF*/
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x019C},
+		{0x0F12, 0x0000},
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x0192},
+		{0x0F12, 0x0000},
+	},
+	/*for special effect MONO*/
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x019C},
+		{0x0F12, 0x0001},
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x0192},
+		{0x0F12, 0x0000},
+	},
+	/*for special efefct Negative*/
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x019C},
+		{0x0F12, 0x0003},
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x0192},
+		{0x0F12, 0x0000},
+	},
+	/*Solarize is not supported by sensor*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*for sepia*/
+	{
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x019C},
+		{0x0F12, 0x0004},
+		{0xFCFC, 0xD000},
+		{0x0028, 0x7000},
+		{0x002A, 0x0192},
+		{0x0F12, 0x0000},
+	},
+	/* Posteraize not supported */
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/* White board not supported*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*Blackboard not supported*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*Aqua not supported*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*Emboss not supported */
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*sketch not supported*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*Neon not supported*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+	/*MAX value*/
+	{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},
+		{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1},},
+};
+
+static struct msm_camera_i2c_conf_array s5k8aay_special_effect_confs[][1] = {
+	{{s5k8aay_special_effect[0],  ARRAY_SIZE(s5k8aay_special_effect[0]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[1],  ARRAY_SIZE(s5k8aay_special_effect[1]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[2],  ARRAY_SIZE(s5k8aay_special_effect[2]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[3],  ARRAY_SIZE(s5k8aay_special_effect[3]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[4],  ARRAY_SIZE(s5k8aay_special_effect[4]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[5],  ARRAY_SIZE(s5k8aay_special_effect[5]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[6],  ARRAY_SIZE(s5k8aay_special_effect[6]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[7],  ARRAY_SIZE(s5k8aay_special_effect[7]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[8],  ARRAY_SIZE(s5k8aay_special_effect[8]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[9],  ARRAY_SIZE(s5k8aay_special_effect[9]),  0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[10], ARRAY_SIZE(s5k8aay_special_effect[10]), 0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[11], ARRAY_SIZE(s5k8aay_special_effect[11]), 0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+	{{s5k8aay_special_effect[12], ARRAY_SIZE(s5k8aay_special_effect[12]), 0,
+		MSM_CAMERA_I2C_WORD_DATA},},
+};
+
+static int s5k8aay_special_effect_enum_map[] = {
+	MSM_V4L2_EFFECT_OFF,
+	MSM_V4L2_EFFECT_MONO,
+	MSM_V4L2_EFFECT_NEGATIVE,
+	MSM_V4L2_EFFECT_SOLARIZE,
+	MSM_V4L2_EFFECT_SEPIA,
+	MSM_V4L2_EFFECT_POSTERAIZE,
+	MSM_V4L2_EFFECT_WHITEBOARD,
+	MSM_V4L2_EFFECT_BLACKBOARD,
+	MSM_V4L2_EFFECT_AQUA,
+	MSM_V4L2_EFFECT_EMBOSS,
+	MSM_V4L2_EFFECT_SKETCH,
+	MSM_V4L2_EFFECT_NEON,
+	MSM_V4L2_EFFECT_MAX,
+};
+
+static struct msm_camera_i2c_enum_conf_array
+		 s5k8aay_special_effect_enum_confs = {
+	.conf = &s5k8aay_special_effect_confs[0][0],
+	.conf_enum = s5k8aay_special_effect_enum_map,
+	.num_enum = ARRAY_SIZE(s5k8aay_special_effect_enum_map),
+	.num_index = ARRAY_SIZE(s5k8aay_special_effect_confs),
+	.num_conf = ARRAY_SIZE(s5k8aay_special_effect_confs[0]),
+	.data_type = MSM_CAMERA_I2C_WORD_DATA,
+};
+
+
+static struct msm_camera_i2c_conf_array s5k8aay_saturation_confs[][2] = {
+};
+
+static int s5k8aay_saturation_enum_map[] = {
+};
+
+static struct msm_camera_i2c_enum_conf_array s5k8aay_saturation_enum_confs = {
+	.conf = &s5k8aay_saturation_confs[0][0],
+	.conf_enum = s5k8aay_saturation_enum_map,
+	.num_enum = ARRAY_SIZE(s5k8aay_saturation_enum_map),
+	.num_index = ARRAY_SIZE(s5k8aay_saturation_confs),
+	.num_conf = ARRAY_SIZE(s5k8aay_saturation_confs[0]),
+	.data_type = MSM_CAMERA_I2C_WORD_DATA,
+};
+
+struct msm_sensor_v4l2_ctrl_info_t s5k8aay_v4l2_ctrl_info[] = {
+	{
+		.ctrl_id = V4L2_CID_SATURATION,
+		.min = MSM_V4L2_SATURATION_L0,
+		.max = MSM_V4L2_SATURATION_L10,
+		.step = 1,
+		.enum_cfg_settings = &s5k8aay_saturation_enum_confs,
+		.s_v4l2_ctrl = msm_sensor_s_ctrl_by_enum,
+	},
+	{
+		.ctrl_id = V4L2_CID_SPECIAL_EFFECT,
+		.min = MSM_V4L2_EFFECT_OFF,
+		.max = MSM_V4L2_EFFECT_SEPIA,
+		.step = 1,
+		.enum_cfg_settings = &s5k8aay_special_effect_enum_confs,
+		.s_v4l2_ctrl = s5k8aay_effect_msm_sensor_s_ctrl_by_enum,
+	},
+};
+
+static struct msm_sensor_output_info_t s5k8aay_dimensions[] = {
+	{
+		.x_output = 0x500,
+//		.y_output = 0x2D0,
+		.y_output = 0x3C0,
+		.line_length_pclk = 0x500,
+//		.frame_length_lines = 0x2D0,
+		.frame_length_lines = 0x3C0,
+		.op_pixel_clk = 128000000,
+//		.vt_pixel_clk = 128000000,
+		.vt_pixel_clk = 36800000,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x280, /* 640 */
+		.y_output = 0x1E0, /* 480 */
+		.line_length_pclk = 0x280, /* 640 */
+		.frame_length_lines = 0x1E0, /* 480 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 9216000,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x320, /* 800 */
+		.y_output = 0x1E0, /* 480 */
+		.line_length_pclk = 0x320, /* 800 */
+		.frame_length_lines = 0x1E0, /* 480 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 11520000,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x3C0, /* 960 */
+		.y_output = 0x2D0, /* 720 */
+		.line_length_pclk = 0x3C0, /* 960 */
+		.frame_length_lines = 0x2D0, /* 720 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 20736000,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x500, /* 1280 */
+		.y_output = 0x2D0, /* 720 */
+		.line_length_pclk = 0x500, /* 1280 */
+		.frame_length_lines = 0x2D0, /* 720 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 27648000,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0xD0, /* 208 */
+		.y_output = 0xB0, /* 176 */
+		.line_length_pclk = 0xD0, /* 208 */
+		.frame_length_lines = 0xB0, /* 176 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 1098240,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x180, /* 384 */
+		.y_output = 0x120, /* 288 */
+		.line_length_pclk = 0x180, /* 384 */
+		.frame_length_lines = 0x120, /* 288 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 3317760,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x300, /* 768 */
+		.y_output = 0x240, /* 576 */
+		.line_length_pclk = 0x300, /* 768 */
+		.frame_length_lines = 0x240, /* 576 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 13271040,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x3C0, /* 960 */
+		.y_output = 0x240, /* 576 */
+		.line_length_pclk = 0x3C0, /* 960 */
+		.frame_length_lines = 0x240, /* 576 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 16588800,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x480, /* 1152 */
+		.y_output = 0x360, /* 864 */
+		.line_length_pclk = 0x480, /* 1152 */
+		.frame_length_lines = 0x360, /* 864 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 29859840,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0xB0, /* 176 */
+		.y_output = 0x90, /* 144 */
+		.line_length_pclk = 0xB0, /* 176 */
+		.frame_length_lines = 0x90, /* 144 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 760320,
+		.binning_factor = 1,
+	},
+	{
+		.x_output = 0x140, /* 320 */
+		.y_output = 0xF0, /* 240 */
+		.line_length_pclk = 0x140, /* 320 */
+		.frame_length_lines = 0xF0, /* 240 */
+		.op_pixel_clk = 128000000,
+		.vt_pixel_clk = 2304000,
+		.binning_factor = 1,
+	},
+};
+
+static struct msm_camera_csid_vc_cfg s5k8aay_cid_cfg[] = {
+	{0, CSI_YUV422_8, CSI_DECODE_8BIT},
+	{1, CSI_EMBED_DATA, CSI_DECODE_8BIT},
+};
+
+static struct msm_camera_csi2_params s5k8aay_csi_params = {
+	.csid_params = {
+//		.lane_assign = 0xe4,
+		.lane_cnt = 1,
+		.lut_params = {
+//			.num_cid = 2,
+			.num_cid = ARRAY_SIZE(s5k8aay_cid_cfg),
+			.vc_cfg = s5k8aay_cid_cfg,
+		},
+	},
+	.csiphy_params = {
+		.lane_cnt = 1,
+		.settle_cnt = 0x14,
+	},
+};
+
+static struct msm_camera_csi2_params *s5k8aay_csi_params_array[] = {
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+	&s5k8aay_csi_params,
+};
+
+static struct msm_sensor_output_reg_addr_t s5k8aay_reg_addr = {
+	.x_output = 0xC868,
+	.y_output = 0xC86A,
+	.line_length_pclk = 0xC868,
+	.frame_length_lines = 0xC86A,
+};
+
+static struct msm_sensor_id_info_t s5k8aay_id_info = {
+	.sensor_id_reg_addr = 0x0,
+//	.sensor_id = 0x2481,
+	.sensor_id = 0x08aa,
+};
+
+/************************* add special ***********************/
+// static bool camera_power_on = false;
+static struct msm_cam_clk_info cam_clk_info[] = {
+	{"cam_clk", MSM_SENSOR_MCLK_24HZ},
+};
+// static struct regulator *reg_l9;
+// static struct regulator *reg_l29;
+
+static int s5k8aay_effect_msm_sensor_s_ctrl_by_enum(struct msm_sensor_ctrl_t *s_ctrl,
+		struct msm_sensor_v4l2_ctrl_info_t *ctrl_info, int value)
+{
+	int rc = 0;
+
+	CDBG("%s: E value = %d \n", __func__, value);
+
+	if (effect_value == value) {
+		CDBG("%s: effect_value no change \n", __func__);
+		return 0;
+	}
+
+	effect_value = value;
+
+	if ((effect_value == CAMERA_EFFECT_OFF) ||
+		(effect_value == CAMERA_EFFECT_MONO) ||
+		(effect_value == CAMERA_EFFECT_NEGATIVE) ||
+		(effect_value == CAMERA_EFFECT_SEPIA)) {
+		CDBG("%s: set\n", __func__);
+		rc = msm_sensor_write_enum_conf_array(
+			s_ctrl->sensor_i2c_client,
+			ctrl_info->enum_cfg_settings, value);
+		if (rc < 0) {
+			pr_err("%s: i2c write err \n", __func__);
+			msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+		}
+		msm_sensor_s5k8aay_set_skip_frame();
+	}
+	CDBG("%s: X rc = %d \n", __func__, rc);
+	return rc;
+}
+
+static int32_t msm_sensor_s5k8aay_write_res_settings(struct msm_sensor_ctrl_t *s_ctrl, uint16_t res)
+{
+	int32_t rc;
+
+	CDBG("%s: E\n", __func__);
+
+	rc = msm_sensor_write_all_conf_array(
+		s_ctrl->sensor_i2c_client,
+//		&s5k8aay_confs_sxga[0],
+//		ARRAY_SIZE(s5k8aay_confs_sxga));
+		&s5k8aay_confs[res],
+		1);
+	if (rc < 0) {
+		pr_err("%s: i2c write err \n", __func__);
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+	}
+
+	CDBG("%s: X rc = %d\n", __func__, rc);
+	return rc;
+}
+
+int32_t msm_sensor_s5k8aay_setting(struct msm_sensor_ctrl_t *s_ctrl,
+			int update_type, int res)
+{
+	int32_t rc = 0;
+
+	CDBG("%s: E\n", __func__);
+
+//	v4l2_subdev_notify(&s_ctrl->sensor_v4l2_subdev,
+//		NOTIFY_ISPIF_STREAM, (void *)ISPIF_STREAM(
+//		PIX_0, ISPIF_OFF_IMMEDIATELY));
+	s_ctrl->func_tbl->sensor_stop_stream(s_ctrl);
+	msleep(30);
+	if (update_type == MSM_SENSOR_REG_INIT) {
+		s_ctrl->curr_csi_params = NULL;
+		msm_sensor_enable_debugfs(s_ctrl);
+		msm_sensor_write_init_settings(s_ctrl);
+	} else if (update_type == MSM_SENSOR_UPDATE_PERIODIC) {
+		msm_sensor_s5k8aay_write_res_settings(s_ctrl, res);
+		if (s_ctrl->curr_csi_params != s_ctrl->csi_params[res]) {
+			s_ctrl->curr_csi_params = s_ctrl->csi_params[res];
+			s_ctrl->curr_csi_params->csid_params.lane_assign =
+				s_ctrl->sensordata->sensor_platform_info->
+				csi_lane_params->csi_lane_assign;
+			s_ctrl->curr_csi_params->csiphy_params.lane_mask =
+				s_ctrl->sensordata->sensor_platform_info->
+				csi_lane_params->csi_lane_mask;
+			v4l2_subdev_notify(&s_ctrl->sensor_v4l2_subdev,
+				NOTIFY_CSID_CFG,
+				&s_ctrl->curr_csi_params->csid_params);
+//			v4l2_subdev_notify(&s_ctrl->sensor_v4l2_subdev,
+//						NOTIFY_CID_CHANGE, NULL);
+			mb();
+			v4l2_subdev_notify(&s_ctrl->sensor_v4l2_subdev,
+				NOTIFY_CSIPHY_CFG,
+				&s_ctrl->curr_csi_params->csiphy_params);
+			mb();
+			msleep(20);
+		}
+
+		v4l2_subdev_notify(&s_ctrl->sensor_v4l2_subdev,
+			NOTIFY_PCLK_CHANGE, &s_ctrl->msm_sensor_reg->
+			output_settings[res].op_pixel_clk);
+//		v4l2_subdev_notify(&s_ctrl->sensor_v4l2_subdev,
+//			NOTIFY_ISPIF_STREAM, (void *)ISPIF_STREAM(
+//			PIX_0, ISPIF_ON_FRAME_BOUNDARY));
+		s_ctrl->func_tbl->sensor_start_stream(s_ctrl);
+		msleep(30);
+	}
+	CDBG("%s: X rc = %d\n", __func__, rc);
+	return rc;
+}
+
+int32_t msm_sensor_s5k8aay_power_up(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int32_t rc = 0;
+	struct msm_camera_sensor_info *data = s_ctrl->sensordata;
+
+	CDBG("%s: %d\n", __func__, __LINE__);
+	s_ctrl->reg_ptr = kzalloc(sizeof(struct regulator *)
+			* data->sensor_platform_info->num_vreg, GFP_KERNEL);
+	if (!s_ctrl->reg_ptr) {
+		pr_err("%s: could not allocate mem for regulators\n",
+			__func__);
+		return -ENOMEM;
+	}
+
+//	rc = msm_camera_request_gpio_table(data, 1);
+//	if (rc < 0) {
+//		pr_err("%s: request gpio failed\n", __func__);
+//		goto request_gpio_failed;
+//		}
+//
+//	msleep(1);
+
+	rc = msm_camera_config_vreg(&s_ctrl->sensor_i2c_client->client->dev,
+			s_ctrl->sensordata->sensor_platform_info->cam_vreg,
+			s_ctrl->sensordata->sensor_platform_info->num_vreg,
+			s_ctrl->reg_ptr, 1);
+	if (rc < 0) {
+		pr_err("%s: regulator on failed\n", __func__);
+		goto config_vreg_failed;
+	}
+
+//	rc = msm_camera_enable_vreg(&s_ctrl->sensor_i2c_client->client->dev,
+//			s_ctrl->sensordata->sensor_platform_info->cam_vreg,
+//			s_ctrl->sensordata->sensor_platform_info->num_vreg,
+//			s_ctrl->reg_ptr, 1);
+//	if (rc < 0) {
+//		pr_err("%s: enable regulator failed\n", __func__);
+//		goto enable_vreg_failed;
+//	}
+	rc = regulator_enable(s_ctrl->reg_ptr[0]);   /* VSCAMA(2.8V) */
+	if (rc < 0) {
+		pr_err("%s: %s regulator enable failed\n", __func__, s_ctrl->sensordata->sensor_platform_info->cam_vreg[0].reg_name);
+		goto enable_vreg_failed;
+	}
+	msleep(1); 
+
+	rc = msm_camera_request_gpio_table(data, 1);
+	if (rc < 0) {
+		pr_err("%s: request gpio failed\n", __func__);
+		goto request_gpio_failed;
+		}
+
+	msleep(1);
+
+	rc = regulator_enable(s_ctrl->reg_ptr[1]);  /* VSCAMIO(1.8V) */
+	if (rc < 0) {
+		pr_err("%s: %s regulator enable failed\n", __func__, s_ctrl->sensordata->sensor_platform_info->cam_vreg[1].reg_name);
+		goto enable_vreg_failed;
+	}
+	msleep(1);
+
+	if (s_ctrl->clk_rate != 0)
+		cam_clk_info->clk_rate = s_ctrl->clk_rate;
+
+	rc = msm_cam_clk_enable(&s_ctrl->sensor_i2c_client->client->dev,
+	cam_clk_info, &s_ctrl->cam_clk, ARRAY_SIZE(cam_clk_info), 1);
+	if (rc < 0) {
+		pr_err("%s: clk enable failed\n", __func__);
+		goto enable_clk_failed;
+	}
+
+	usleep_range(50, 50);
+
+	rc = msm_camera_config_gpio_table(data, 1);
+	if (rc < 0) {
+		pr_err("%s: config gpio failed\n", __func__);
+		goto config_gpio_failed;
+	}
+
+	if (data->sensor_platform_info->ext_power_ctrl != NULL)
+		data->sensor_platform_info->ext_power_ctrl(1);
+
+	return rc;
+//enable_clk_failed:
+//		msm_camera_config_gpio_table(data, 0);
+config_gpio_failed:
+	msm_camera_enable_vreg(&s_ctrl->sensor_i2c_client->client->dev,
+			s_ctrl->sensordata->sensor_platform_info->cam_vreg,
+			s_ctrl->sensordata->sensor_platform_info->num_vreg,
+			s_ctrl->reg_ptr, 0);
+enable_clk_failed:
+		msm_camera_config_gpio_table(data, 0);
+request_gpio_failed:
+enable_vreg_failed:
+	msm_camera_config_vreg(&s_ctrl->sensor_i2c_client->client->dev,
+		s_ctrl->sensordata->sensor_platform_info->cam_vreg,
+		s_ctrl->sensordata->sensor_platform_info->num_vreg,
+		s_ctrl->reg_ptr, 0);
+config_vreg_failed:
+	msm_camera_request_gpio_table(data, 0);
+//request_gpio_failed:
+	kfree(s_ctrl->reg_ptr);
+	return rc;
+}
+
+int32_t msm_sensor_s5k8aay_power_down(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	struct msm_camera_sensor_info *data = s_ctrl->sensordata;
+	CDBG("%s\n", __func__);
+
+	s_ctrl->func_tbl->sensor_stop_stream(s_ctrl);
+	msleep(20);
+	if (data->sensor_platform_info->ext_power_ctrl != NULL)
+		data->sensor_platform_info->ext_power_ctrl(0);
+
+//	msm_camera_config_gpio_table(data, 0);
+//	gpio_set_value(2, 0);       /* Standby on */
+	gpio_set_value_cansleep(2, 0);       /* Standby on */
+//	usleep_range(500, 500);
+	usleep_range(66000, 66000);
+
+//	gpio_set_value(68,0);       /* Reset Low*/
+	gpio_set_value_cansleep(68,0);       /* Reset Low*/
+	usleep_range(500, 500);
+
+	msm_cam_clk_enable(&s_ctrl->sensor_i2c_client->client->dev,
+	cam_clk_info, &s_ctrl->cam_clk, ARRAY_SIZE(cam_clk_info), 0);
+
+//	msm_camera_enable_vreg(&s_ctrl->sensor_i2c_client->client->dev,
+//		s_ctrl->sensordata->sensor_platform_info->cam_vreg,
+//		s_ctrl->sensordata->sensor_platform_info->num_vreg,
+//		s_ctrl->reg_ptr, 0);
+	regulator_disable(s_ctrl->reg_ptr[1]);  /* VSCAMIO(1.8V) */
+	msleep(1);
+	gpio_set_value_cansleep(3, 0);
+	msm_camera_request_gpio_table(data, 0);
+	msleep(1);
+	regulator_disable(s_ctrl->reg_ptr[0]);   /* VSCAMA(2.8V) */
+//	msleep(1); 
+
+	msm_camera_config_vreg(&s_ctrl->sensor_i2c_client->client->dev,
+		s_ctrl->sensordata->sensor_platform_info->cam_vreg,
+		s_ctrl->sensordata->sensor_platform_info->num_vreg,
+		s_ctrl->reg_ptr, 0);
+//	msm_camera_request_gpio_table(data, 0);
+	kfree(s_ctrl->reg_ptr);
+
+	msleep(200);
+
+	return 0;
+}
+
+int32_t msm_sensor_s5k8aay_match_id(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int32_t rc = 0;
+	uint16_t chip_id = 0;
+
+	static struct msm_camera_i2c_reg_conf s5k8aay_id_read_settings[] = {
+		{0xFCFC, 0xD000},
+		{0x002C, 0x0000},
+		{0x002E, 0x0040},
+	};
+
+	CDBG("%s: E\n", __func__);
+
+	rc = msm_camera_i2c_write_tbl(
+		s_ctrl->sensor_i2c_client,
+		&s5k8aay_id_read_settings[0],
+		ARRAY_SIZE(s5k8aay_id_read_settings),
+		s_ctrl->msm_sensor_reg->default_data_type);
+	if (rc < 0) {
+		pr_err("%s: i2c write err \n", __func__);
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+		goto failure;
+	}
+	rc = msm_camera_i2c_read(
+		s_ctrl->sensor_i2c_client,
+		S5K8AAY_REG_READ_ADDR,
+		&chip_id,
+		s_ctrl->msm_sensor_reg->default_data_type);
+	if (rc < 0) {
+		pr_err("%s: i2c read err \n", __func__);
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+		goto failure;
+	}
+	CDBG("%s: chip_id = %x\n", __func__, chip_id);
+	if (chip_id != s_ctrl->sensor_id_info->sensor_id) {
+		pr_err("msm_sensor_match_id chip id doesnot match\n");
+		rc = -ENODEV;
+		goto failure;
+	}
+
+failure:
+	CDBG("%s: X rc = %d\n", __func__, rc);
+//	return 0;
+	return rc;
+}
+
+//void msm_sensor_s5k8aay_start_stream(struct msm_sensor_ctrl_t *s_ctrl)
+//{
+//printk("%s: E\n", __func__);
+////	msm_camera_i2c_write_tbl(
+////		s_ctrl->sensor_i2c_client,
+////		s_ctrl->msm_sensor_reg->start_stream_conf,
+////		ARRAY_SIZE(s5k8aay_config_change_settings),
+////		s_ctrl->msm_sensor_reg->default_data_type);
+//	msm_sensor_write_all_conf_array(
+//		s_ctrl->sensor_i2c_client,
+//		&s5k8aay_start_stream_conf[0],
+//		ARRAY_SIZE(s5k8aay_start_stream_conf));
+//printk("%s: X\n", __func__);
+//}
+
+static void msm_sensor_s5k8aay_start_stream(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	CDBG("%s: E\n", __func__);
+	msm_sensor_start_stream(s_ctrl);
+
+	s5k8aay_skip_frame_flg = 0;
+
+	s5k8aay_power_on_flg = 1;
+	if (s5k8aay_err_chk_work_flg == 0) {
+		s5k8aay_err_chk_work_flg = 1;
+		s5k8aay_err_chk_work->s_ctrl = s_ctrl;
+		queue_work( s5k8aay_err_chk_wq, (struct work_struct *)s5k8aay_err_chk_work );
+	}
+
+	CDBG("%s: X\n", __func__);
+}
+
+static void msm_sensor_s5k8aay_stop_stream(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	CDBG("%s: E\n", __func__);
+
+	s5k8aay_power_on_flg = 0;
+
+	msm_sensor_stop_stream(s_ctrl);
+	CDBG("%s: X\n", __func__);
+}
+
+//int32_t msm_sensor_s5k8aay_write_exp(struct msm_sensor_ctrl_t *s_ctrl,
+//		uint16_t gain, uint32_t line)
+int32_t msm_sensor_s5k8aay_write_exp(struct msm_sensor_ctrl_t *s_ctrl, int8_t exp_value)
+{
+//	int32_t exp_value = (int32_t)gain;
+	int32_t exp_setting;
+	int32_t rc = 0;
+
+	exp_setting = exp_value / S5K8AAY_EXPOSURE_VALUE_STEP + S5K8AAY_EXPOSURE_VALUE_MAX;
+	if (exp_setting < 0) {
+		exp_setting = 0;
+	}
+	else if (exp_setting > (S5K8AAY_EXPOSURE_VALUE_MAX * 2)) {
+		exp_setting = S5K8AAY_EXPOSURE_VALUE_MAX * 2;
+	}
+
+	CDBG("%s: exp_value = %d, exp_setting = %d\n", __func__, exp_value, exp_setting);
+
+	if (pre_exp_setting == exp_setting) {
+		CDBG("%s: exp_setting no change \n", __func__);
+		return 0;
+	}
+	pre_exp_setting = exp_setting;
+
+	rc = msm_camera_i2c_write_tbl(
+		s_ctrl->sensor_i2c_client,
+		&s5k8aay_config_exposure_settings[exp_setting][0],
+		ARRAY_SIZE(s5k8aay_config_exposure_settings[exp_setting]),
+		s_ctrl->msm_sensor_reg->default_data_type);
+	if (rc < 0) {
+		pr_err("%s: i2c write err \n", __func__);
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+	}
+
+	msm_sensor_s5k8aay_set_skip_frame();
+
+	CDBG("%s: rc = %d\n", __func__, rc);
+	return rc;
+}
+
+int32_t msm_sensor_s5k8aay_set_white_balance(struct msm_sensor_ctrl_t *s_ctrl, int8_t wb)
+{
+	int32_t index = 0;
+	int32_t rc = 0;
+
+	CDBG("%s: wb = %d\n", __func__, wb);
+
+	if (s5k8aay_wb == wb) {
+		CDBG("%s: wb no change \n", __func__);
+		return 0;
+	}
+
+	s5k8aay_wb = wb;
+
+	switch (wb) {
+	case CAMERA_WB_DAYLIGHT:
+		index = S5K8AAY_WB_DAYLIGHT;
+		break;
+
+	case CAMERA_WB_FLUORESCENT:
+		index = S5K8AAY_WB_FLUORESCENT;
+		break;
+
+	case CAMERA_WB_CLOUDY_DAYLIGHT:
+		index = S5K8AAY_WB_CLOUDY_DAYLIGHT;
+		break;
+
+	case CAMERA_WB_INCANDESCENT:
+		index = S5K8AAY_WB_INCANDESCENT;
+		break;
+
+	case CAMERA_WB_AUTO:
+	default:
+		index = S5K8AAY_WB_AUTO;
+		break;
+	}
+
+	rc = msm_camera_i2c_write_tbl(
+		s_ctrl->sensor_i2c_client,
+		&s5k8aay_config_white_balance_settings[index][0],
+		ARRAY_SIZE(s5k8aay_config_white_balance_settings[index]),
+		s_ctrl->msm_sensor_reg->default_data_type);
+	if (rc < 0) {
+		pr_err("%s: i2c write err \n", __func__);
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+	}
+
+	msm_sensor_s5k8aay_set_skip_frame();
+
+	CDBG("%s: rc = %d\n", __func__, rc);
+	return rc;
+}
+
+static int32_t msm_sensor_s5k8aay_set_note_takepic(struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int32_t rc = 0;
+	int32_t i;
+	uint16_t data[2];
+
+	CDBG("%s: E\n", __func__);
+
+	rc = msm_camera_i2c_write_tbl(
+		s_ctrl->sensor_i2c_client,
+		&s5k8aay_exp_time_settings[0],
+		ARRAY_SIZE(s5k8aay_exp_time_settings),
+		s_ctrl->msm_sensor_reg->default_data_type);
+	if (rc < 0) {
+		pr_err("%s: i2c write err \n", __func__);
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+		goto failure;
+	}
+
+	for (i=0; i<2; i++) {
+		rc = msm_camera_i2c_read(
+			s_ctrl->sensor_i2c_client,
+			S5K8AAY_REG_READ_ADDR,
+			&data[i],
+			s_ctrl->msm_sensor_reg->default_data_type);
+		if (rc < 0) {
+			pr_err("%s: i2c read err \n", __func__);
+			msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+			goto failure;
+		}
+	}
+
+	s5k8aay_g_exposure_time = ((data[1]<<16) | data[0]) / S5K8AAY_EXP_TIME_DIVISOR;
+
+	CDBG("%s: exposure_time = %d\n", __func__, s5k8aay_g_exposure_time);
+
+failure:
+
+	CDBG("%s: X rc = %d\n", __func__, rc);
+	return rc;
+}
+
+static int32_t msm_sensor_s5k8aay_get_exp_time(struct msm_sensor_ctrl_t *s_ctrl, uint32_t *exposure_time)
+{
+//	int32_t rc = 0;
+//	int32_t i;
+//	uint16_t data[2];
+//
+//	CDBG("%s: E\n", __func__);
+//
+////	mutex_lock(s_ctrl->msm_sensor_mutex);
+//
+//	rc = msm_camera_i2c_write_tbl(
+//		s_ctrl->sensor_i2c_client,
+//		&s5k8aay_exp_time_settings[0],
+//		ARRAY_SIZE(s5k8aay_exp_time_settings),
+//		s_ctrl->msm_sensor_reg->default_data_type);
+//	if (rc < 0) {
+//		pr_err("%s: i2c write err \n", __func__);
+//		goto failure;
+//	}
+//
+//	for (i=0; i<2; i++) {
+//		rc = msm_camera_i2c_read(
+//			s_ctrl->sensor_i2c_client,
+//			S5K8AAY_REG_READ_ADDR,
+//			&data[i],
+//			s_ctrl->msm_sensor_reg->default_data_type);
+//		if (rc < 0) {
+//			pr_err("%s: i2c read err \n", __func__);
+//			goto failure;
+//		}
+//	}
+//
+//	*exposure_time = ((data[1]<<16) | data[0]) / S5K8AAY_EXP_TIME_DIVISOR;
+//
+//	CDBG("%s: exposure_time = %d\n", __func__, *exposure_time);
+//
+//failure:
+//
+////	mutex_unlock(s_ctrl->msm_sensor_mutex);
+//
+//	CDBG("%s: X rc = %d\n", __func__, rc);
+//	return rc;
+	
+	CDBG("%s: E\n", __func__);
+
+	*exposure_time = s5k8aay_g_exposure_time;
+
+	CDBG("%s: X exposure_time = %d\n", __func__, *exposure_time);
+	return 0;
+}
+
+static void msm_sensor_s5k8aay_error_check_work(struct work_struct *work)
+{
+	int32_t i2c_rc = 0;
+	int32_t reg_rc = 0;
+	int32_t i;
+	uint16_t read_data;
+	s5k8aay_work_t *tmp_work = (s5k8aay_work_t *)work;
+	struct msm_sensor_ctrl_t *s_ctrl = tmp_work->s_ctrl;
+
+	CDBG("%s: E\n", __func__);
+
+	if (s5k8aay_power_on_flg) {
+		mutex_lock(s_ctrl->msm_sensor_mutex);
+
+		i2c_rc = msm_camera_i2c_write_tbl(
+			s_ctrl->sensor_i2c_client,
+			&s5k8aay_error_check_write_reg[0],
+			ARRAY_SIZE(s5k8aay_error_check_write_reg),
+			s_ctrl->msm_sensor_reg->default_data_type);
+
+		mutex_unlock(s_ctrl->msm_sensor_mutex);
+	}
+
+	if (i2c_rc < 0) {
+		msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+	}
+
+	while (s5k8aay_power_on_flg) {
+	CDBG("%s: loop \n", __func__);
+
+		if (s5k8aay_power_on_flg) {
+			mutex_lock(s_ctrl->msm_sensor_mutex);
+
+			for (i=0; i<ARRAY_SIZE(s5k8aay_error_check_reg); i++) {
+				i2c_rc = msm_camera_i2c_write_tbl(
+					s_ctrl->sensor_i2c_client,
+					&s5k8aay_error_check_reg[i][0],
+					ARRAY_SIZE(s5k8aay_error_check_reg[i]),
+					s_ctrl->msm_sensor_reg->default_data_type);
+				if (i2c_rc < 0) {
+					pr_err("%s: i2c write err \n", __func__);
+					break;
+				}
+
+				i2c_rc = msm_camera_i2c_read(
+					s_ctrl->sensor_i2c_client,
+					S5K8AAY_REG_READ_ADDR,
+					&read_data,
+					s_ctrl->msm_sensor_reg->default_data_type);
+				if (i2c_rc < 0) {
+					pr_err("%s: i2c read err \n", __func__);
+					break;
+				}
+
+				CDBG("%s: read_data = %x \n", __func__, read_data);
+				if (read_data != S5K8AAY_ERR_CHK_VAL) {
+					pr_err("%s: read_data err \n", __func__);
+					reg_rc = -1;
+					break;
+				}
+			}
+
+			mutex_unlock(s_ctrl->msm_sensor_mutex);
+		}
+
+		if (i2c_rc < 0) {
+			pr_err("%s: X i2c_rc = %d\n", __func__, i2c_rc);
+			msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+//			return;
+			break;
+		}
+		else if (reg_rc < 0) {
+			pr_err("%s: X reg_rc = %d\n", __func__, reg_rc);
+			msm_sensor_evt_notify(s_ctrl, MSG_ID_ERROR_I2C);
+//			return;
+			break;
+		}
+		else {
+			CDBG("%s: OK\n", __func__);
+		}
+
+		msleep(2000);
+	}
+
+	s5k8aay_err_chk_work_flg = 0;
+	CDBG("%s: X\n", __func__);
+	return;
+}
+
+static void msm_sensor_s5k8aay_set_skip_frame(void) {
+	CDBG("%s: E\n", __func__);
+	s5k8aay_skip_frame_flg = 1;
+}
+
+static void msm_sensor_s5k8aay_get_frame_skip_flg(struct msm_sensor_ctrl_t *s_ctrl, uint8_t *flag)
+{
+	CDBG("%s: E\n", __func__);
+	*flag = s5k8aay_skip_frame_flg;
+	s5k8aay_skip_frame_flg = 0;
+}
+
+static const struct i2c_device_id s5k8aay_i2c_id[] = {
+	{SENSOR_NAME, (kernel_ulong_t)&s5k8aay_s_ctrl},
+	{ }
+};
+
+static struct i2c_driver s5k8aay_i2c_driver = {
+	.id_table = s5k8aay_i2c_id,
+	.probe  = msm_sensor_i2c_probe,
+	.driver = {
+		.name = SENSOR_NAME,
+	},
+};
+
+static struct msm_camera_i2c_client s5k8aay_sensor_i2c_client = {
+	.addr_type = MSM_CAMERA_I2C_WORD_ADDR,
+};
+
+static int __init msm_sensor_init_module(void)
+{
+	s5k8aay_err_chk_wq = create_workqueue("s5k8aay_err_chk_queue");
+	if (s5k8aay_err_chk_wq) {
+		s5k8aay_err_chk_work = (s5k8aay_work_t *)kmalloc(sizeof(s5k8aay_work_t), GFP_KERNEL);
+		if (s5k8aay_err_chk_work) {
+			INIT_WORK( (struct work_struct *)s5k8aay_err_chk_work, msm_sensor_s5k8aay_error_check_work );
+		}
+	}
+
+	return i2c_add_driver(&s5k8aay_i2c_driver);
+}
+
+static struct v4l2_subdev_core_ops s5k8aay_subdev_core_ops = {
+	.s_ctrl = msm_sensor_v4l2_s_ctrl,
+	.queryctrl = msm_sensor_v4l2_query_ctrl,
+	.ioctl = msm_sensor_subdev_ioctl,
+	.s_power = msm_sensor_power,
+};
+
+static struct v4l2_subdev_video_ops s5k8aay_subdev_video_ops = {
+	.enum_mbus_fmt = msm_sensor_v4l2_enum_fmt,
+};
+
+static struct v4l2_subdev_ops s5k8aay_subdev_ops = {
+	.core = &s5k8aay_subdev_core_ops,
+	.video  = &s5k8aay_subdev_video_ops,
+};
+
+static struct msm_sensor_fn_t s5k8aay_func_tbl = {
+//	.sensor_start_stream = msm_sensor_start_stream,
+	.sensor_start_stream = msm_sensor_s5k8aay_start_stream,
+//	.sensor_stop_stream = s5k8aay_stop_stream,
+//	.sensor_stop_stream = msm_sensor_stop_stream,
+	.sensor_stop_stream = msm_sensor_s5k8aay_stop_stream,
+//	.sensor_setting = msm_sensor_setting,
+	.sensor_setting = msm_sensor_s5k8aay_setting,
+	.sensor_set_sensor_mode = msm_sensor_set_sensor_mode,
+	.sensor_mode_init = msm_sensor_mode_init,
+	.sensor_get_output_info = msm_sensor_get_output_info,
+	.sensor_config = msm_sensor_config,
+	.sensor_power_up = msm_sensor_s5k8aay_power_up, /* add special */
+	.sensor_power_down = msm_sensor_s5k8aay_power_down, /* add special */
+//	.sensor_power_up = msm_sensor_power_up,  /* kill org */
+//	.sensor_power_down = msm_sensor_power_down,  /* kill org */
+	.sensor_match_id =  msm_sensor_s5k8aay_match_id,
+//	.sensor_write_exp_gain = msm_sensor_s5k8aay_write_exp,
+	.sensor_set_exposure_compensation = msm_sensor_s5k8aay_write_exp,
+	.sensor_set_white_balance = msm_sensor_s5k8aay_set_white_balance,
+	.sensor_get_exposure_time = msm_sensor_s5k8aay_get_exp_time,
+	.sensor_set_note_takepic = msm_sensor_s5k8aay_set_note_takepic,
+	.sensor_get_csi_params = msm_sensor_get_csi_params,
+	.sensor_get_frame_skip_flg = msm_sensor_s5k8aay_get_frame_skip_flg,
+	.sensor_get_csi_params = msm_sensor_get_csi_params,
+};
+
+static struct msm_sensor_reg_t s5k8aay_regs = {
+	.default_data_type = MSM_CAMERA_I2C_WORD_DATA, /* add special */
+//	.default_data_type = MSM_CAMERA_I2C_BYTE_DATA, /* kill org */
+//	.start_stream_conf = s5k8aay_config_change_settings,
+//	.start_stream_conf_size = ARRAY_SIZE(s5k8aay_config_change_settings),
+	.start_stream_conf = s5k8aay_start_stream_settings,
+	.start_stream_conf_size = ARRAY_SIZE(s5k8aay_start_stream_settings),
+	.stop_stream_conf = s5k8aay_stop_stream_settings,
+	.stop_stream_conf_size = ARRAY_SIZE(s5k8aay_stop_stream_settings),
+	.init_settings = &s5k8aay_init_conf[0],
+	.init_size = ARRAY_SIZE(s5k8aay_init_conf),
+//	.mode_settings = &s5k8aay_confs[0],
+	.output_settings = &s5k8aay_dimensions[0],
+//	.num_conf = ARRAY_SIZE(s5k8aay_confs),
+	.num_conf = ARRAY_SIZE(s5k8aay_dimensions),
+};
+
+static struct msm_sensor_ctrl_t s5k8aay_s_ctrl = {
+	.msm_sensor_reg = &s5k8aay_regs,
+	.msm_sensor_v4l2_ctrl_info = s5k8aay_v4l2_ctrl_info,
+	.num_v4l2_ctrl = ARRAY_SIZE(s5k8aay_v4l2_ctrl_info),
+	.sensor_i2c_client = &s5k8aay_sensor_i2c_client,
+	.sensor_i2c_addr = 0x7A,
+	.sensor_output_reg_addr = &s5k8aay_reg_addr,
+	.sensor_id_info = &s5k8aay_id_info,
+	.cam_mode = MSM_SENSOR_MODE_INVALID,
+	.csi_params = &s5k8aay_csi_params_array[0],
+	.msm_sensor_mutex = &s5k8aay_mut,
+	.sensor_i2c_driver = &s5k8aay_i2c_driver,
+	.sensor_v4l2_subdev_info = s5k8aay_subdev_info,
+	.sensor_v4l2_subdev_info_size = ARRAY_SIZE(s5k8aay_subdev_info),
+	.sensor_v4l2_subdev_ops = &s5k8aay_subdev_ops,
+	.func_tbl = &s5k8aay_func_tbl,
+};
+
+module_init(msm_sensor_init_module);
+MODULE_DESCRIPTION("Samsung 1.2MP YUV sensor driver");
+MODULE_LICENSE("GPL v2");
