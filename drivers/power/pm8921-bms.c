@@ -38,7 +38,7 @@
 #include <linux/uaccess.h>
 #include <linux/reboot.h>
 #include <linux/rtc.h>
-#include <pm8921-charger_oem.h>
+#include "pm8921-charger_oem.h"
 
 #define BMS_CONTROL		0x224
 #define BMS_S1_DELAY		0x225
