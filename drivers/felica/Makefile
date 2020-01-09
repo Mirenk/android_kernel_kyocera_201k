@@ -20,6 +20,6 @@ SOURCES = felica.c
 
 obj-m := $(TARGET).o
 
-MAKE_FLAGS := -C $(KERNEL_DIR) O=$(KERNEL_OUT) ARCH=arm CROSS_COMPILE=arm-eabi-
+MAKE_FLAGS := -C $(KERNEL_DIR) O=$(KERNEL_OUT) ARCH=arm $(KERNEL_CROSS_COMPILE)
 EXTRA_CFLAGS += $(addprefix -I, $(INC_PATH))
 

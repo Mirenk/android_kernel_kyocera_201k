@@ -24,7 +24,7 @@ MODULES = kc_sdgdrv
 obj-m := $(MODULES).o
 $(MODULES)-objs += sdgpiodrv.o
 
-MAKE_FLAGS := -C $(KERNEL_DIR) O=$(KERNEL_OUT) ARCH=arm CROSS_COMPILE=arm-eabi-
+MAKE_FLAGS := -C $(KERNEL_DIR) O=$(KERNEL_OUT) ARCH=arm $(KERNEL_CROSS_COMPILE)
 EXTRA_CFLAGS += $(addprefix -I, $(INC_PATH))
 
 EXTRA_CFLAGS += -D_LINUX_KERNEL_
